@@ -58,7 +58,8 @@ def decode_hparams(overrides=""):
       shards=1,
       shard_id=0,
       num_decodes=1,
-      force_decode_length=False)
+      force_decode_length=False,
+      multi_targets=False)
   hp.parse(overrides)
   return hp
 
@@ -247,13 +248,27 @@ def decode_once(estimator,
     # Log predictions
     decoded_outputs = []
     decoded_scores = []
-    if decode_hp.return_beams:
-      output_beams = np.split(outputs, decode_hp.beam_size, axis=0)
+    if decode_hp.return_beams or decode_hp.multi_targets:
+      output_beams = np.split(outputs, outputs.shape[0], axis=0)
       scores = None
       if "scores" in prediction:
-        scores = np.split(prediction["scores"], decode_hp.beam_size, axis=0)
+        scores = np.split(prediction["scores"], 
+                          prediction["scores"].shape[0],
+                          axis=0)
+      target_i = targets
       for i, beam in enumerate(output_beams):
-        tf.logging.info("BEAM %d:" % i)
+        if decode_hp.multi_targets and decode_hp.return_beams:
+          beam_id = (i % decode_hp.beam_size)
+          target_id = i // (decode_hp.beam_size)
+          target_i = targets[target_id]
+          if not beam_id:
+            tf.logging.info("TARGET %d:" % target_id)
+          tf.logging.info("BEAM %d:" % beam_id)
+        elif decode_hp.multi_targets:
+          target_i = targets[i]
+          tf.logging.info("TARGET %d:" % i)
+        else:
+          tf.logging.info("BEAM %d:" % i)
         score = scores and scores[i]
         decoded = log_decode_results(
             inputs,
@@ -265,7 +280,7 @@ def decode_once(estimator,
             save_images=decode_hp.save_images,
             output_dir=output_dir,
             identity_output=decode_hp.identity_output,
-            targets=targets,
+            targets=target_i,
             log_results=decode_hp.log_results)
         decoded_outputs.append(decoded)
         if decode_hp.write_beam_scores:
@@ -359,10 +374,12 @@ def decode_from_file(estimator,
     if decode_hp.return_beams:
       beam_decodes = []
       beam_scores = []
-      output_beams = np.split(result["outputs"], decode_hp.beam_size, axis=0)
+      output_beams = np.split(result["outputs"], 
+                              result["outputs"].shape[0], 
+                              axis=0)
       scores = None
       if "scores" in result:
-        scores = np.split(result["scores"], decode_hp.beam_size, axis=0)
+        scores = np.split(result["scores"], result["scores"].shape[0], axis=0)
       for k, beam in enumerate(output_beams):
         tf.logging.info("BEAM %d:" % k)
         score = scores and scores[k]
@@ -472,10 +489,10 @@ def decode_interactively(estimator, hparams, decode_hp, checkpoint_path=None):
     targets_vocab = hparams.problem_hparams.vocabulary["targets"]
 
     if decode_hp.return_beams:
-      beams = np.split(result["outputs"], decode_hp.beam_size, axis=0)
+      beams = np.split(result["outputs"], result["outputs"].shape[0], axis=0)
       scores = None
       if "scores" in result:
-        scores = np.split(result["scores"], decode_hp.beam_size, axis=0)
+        scores = np.split(result["scores"], result["scores"].shape[0], axis=0)
       for k, beam in enumerate(beams):
         tf.logging.info("BEAM %d:" % k)
         beam_string = targets_vocab.decode(_save_until_eos(
