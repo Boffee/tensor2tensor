@@ -192,7 +192,8 @@ def evaluate_world_model(simulated_problem_name, problem_name, hparams,
       / float(n))
   old_path = os.path.join(epoch_data_dir, "debug_frames_sim")
   new_path = os.path.join(epoch_data_dir, "debug_frames_sim_eval")
-  tf.gfile.Rename(old_path, new_path)
+  if not tf.gfile.Exists(new_path):
+    tf.gfile.Rename(old_path, new_path)
   return model_reward_accuracy
 
 
@@ -328,18 +329,18 @@ def training_loop(hparams, output_dir, report_fn=None, report_metric=None):
 
   # Problems
   if using_autoencoder:
-    problem_name = \
-      "gym_discrete_problem_with_agent_on_%s_with_autoencoder" % hparams.game
-    world_model_problem = \
-      "gym_discrete_problem_with_agent_on_%s_autoencoded" % hparams.game
-    simulated_problem_name = \
-      "gym_simulated_discrete_problem_with_agent_on_%s_autoencoded" \
-      % hparams.game
+    problem_name = (
+        "gym_discrete_problem_with_agent_on_%s_with_autoencoder" % hparams.game)
+    world_model_problem = (
+        "gym_discrete_problem_with_agent_on_%s_autoencoded" % hparams.game)
+    simulated_problem_name = (
+        "gym_simulated_discrete_problem_with_agent_on_%s_autoencoded"
+        % hparams.game)
   else:
-    problem_name = "gym_discrete_problem_with_agent_on_%s" % hparams.game
+    problem_name = ("gym_discrete_problem_with_agent_on_%s" % hparams.game)
     world_model_problem = problem_name
-    simulated_problem_name = "gym_simulated_discrete_problem_with_agent_on_%s"\
-                             % hparams.game
+    simulated_problem_name = ("gym_simulated_discrete_problem_with_agent_on_%s"
+                              % hparams.game)
 
   # Autoencoder model dir
   autoencoder_model_dir = directories.get("autoencoder")
@@ -359,15 +360,14 @@ def training_loop(hparams, output_dir, report_fn=None, report_metric=None):
       problem_name, None, hparams, data_dir, directories["tmp"])
   tf.logging.info("Mean reward (random): {}".format(mean_reward))
 
-
   eval_metrics_event_dir = os.path.join(directories["world_model"],
                                         "eval_metrics_event_dir")
   eval_metrics_writer = tf.summary.FileWriter(eval_metrics_event_dir)
   model_reward_accuracy_summary = tf.Summary()
-  model_reward_accuracy_summary.value.add(tag='model_reward_accuracy',
+  model_reward_accuracy_summary.value.add(tag="model_reward_accuracy",
                                           simple_value=None)
   mean_reward_summary = tf.Summary()
-  mean_reward_summary.value.add(tag='mean_reward',
+  mean_reward_summary.value.add(tag="mean_reward",
                                 simple_value=None)
 
   for epoch in range(hparams.epochs):
@@ -436,25 +436,23 @@ def training_loop(hparams, output_dir, report_fn=None, report_metric=None):
           eval_phase=False)
       log("Mean reward during generation: {}".format(generation_mean_reward))
 
-    # Report metrics.
-    eval_metrics = {"model_reward_accuracy": model_reward_accuracy,
-                    "mean_reward": mean_reward}
-
-    model_reward_accuracy_summary.value[0].simple_value \
-      = model_reward_accuracy
-
-    mean_reward_summary.value[0].simple_value \
-      = mean_reward
-
+    # Summarize metrics
+    assert model_reward_accuracy is not None
+    assert mean_reward is not None
+    model_reward_accuracy_summary.value[0].simple_value = model_reward_accuracy
+    mean_reward_summary.value[0].simple_value = mean_reward
     eval_metrics_writer.add_summary(model_reward_accuracy_summary, epoch)
     eval_metrics_writer.add_summary(mean_reward_summary, epoch)
 
+    # Report metrics
+    eval_metrics = {"model_reward_accuracy": model_reward_accuracy,
+                    "mean_reward": mean_reward}
     epoch_metrics.append(eval_metrics)
     log("Eval metrics: %s", str(eval_metrics))
     if report_fn:
       report_fn(eval_metrics[report_metric], epoch)
 
-  # Report the evaluation metrics from the final epoch
+  # Return the evaluation metrics from the final epoch
   return epoch_metrics[-1]
 
 

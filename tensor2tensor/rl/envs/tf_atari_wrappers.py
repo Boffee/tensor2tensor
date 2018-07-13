@@ -18,11 +18,11 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-from tensor2tensor.layers import discretization
-from tensor2tensor.rl.envs.in_graph_batch_env import InGraphBatchEnv
-from tensor2tensor.models.research import autoencoders
 import math
 
+from tensor2tensor.layers import discretization
+from tensor2tensor.models.research import autoencoders
+from tensor2tensor.rl.envs.in_graph_batch_env import InGraphBatchEnv
 
 import tensorflow as tf
 
@@ -160,7 +160,7 @@ class AutoencoderWrapper(WrapperBase):
     batch_size, height, width, _ = self._batch_env.observ.get_shape().as_list()
     ae_height = int(math.ceil(height / self.autoencoder_factor))
     ae_width = int(math.ceil(width / self.autoencoder_factor))
-    ae_channels = 24 #TODO (piotrmilos): make it better
+    ae_channels = 24  # TODO(piotrmilos): make it better
     observ_shape = (batch_size, ae_height, ae_width, ae_channels)
     self._observ = self._observ = tf.Variable(
         tf.zeros(observ_shape, tf.float32), trainable=False)
@@ -187,7 +187,7 @@ class AutoencoderWrapper(WrapperBase):
 
   def _reset_non_empty(self, indices):
     with tf.variable_scope(tf.get_variable_scope(), reuse=tf.AUTO_REUSE):
-      new_values = self._batch_env._reset_non_empty(indices)
+      new_values = self._batch_env._reset_non_empty(indices)  # pylint: disable=protected-access
       ret = self.autoencoder_model.encode(new_values)
       assign_op = tf.scatter_update(self._observ, indices, ret)
       with tf.control_dependencies([assign_op]):
@@ -201,7 +201,7 @@ class IntToBitWrapper(WrapperBase):
     super(IntToBitWrapper, self).__init__(batch_env)
     batch_size, height, width, channels = \
       self._batch_env.observ.get_shape().as_list()
-    #We treat each channel as 8-bit integer to be expanded to 8 channels
+    # We treat each channel as 8-bit integer to be expanded to 8 channels
     self.observ_shape = (height, width, channels*8)
     self._observ = self._observ = tf.Variable(
         tf.zeros((batch_size,) + self.observ_shape, tf.float32),

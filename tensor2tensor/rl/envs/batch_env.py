@@ -120,7 +120,7 @@ class BatchEnv(object):
       observs = [self._envs[index].reset(blocking=False) for index in indices]
       observs = [observ() for observ in observs]
     observ = np.stack(observs)
-    #TODO(piotrmilos): Do we really want this?
+    # TODO(piotrmilos): Do we really want this?
     observ = observ.astype(np.float32)
     return observ
 

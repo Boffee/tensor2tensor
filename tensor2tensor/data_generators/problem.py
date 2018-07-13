@@ -108,6 +108,12 @@ class SpaceID(object):
   EN_NLI = 33
   # COLA
   COLA = 34
+  # Enligh Question Context pair
+  EN_Q_CONT = 35
+  # English similarity task
+  EN_SIM = 36
+  # 3 class NLI
+  THREE_CL_NLI = 37
 
 
 def default_model_hparams():
@@ -717,6 +723,14 @@ class Problem(object):
       # Reset in the case when using TPU but alternating TRAIN and EVAL.
       self._next_partition_id = 0
       return 0, 1
+    # BEGIN GOOGLE-INTERNAL
+    # make mesh-tensorflow on TPU work with patch CL/202825176
+    # TODO(ylc): fix this once TPU estimator changes are checked in.
+    if getattr(config.tpu_config, "symmetric_sharding_enabled", False):
+      tf.logging.info("symmetric_sharding_enabled")
+      self._next_partition_id = 0
+      return 0, 1
+    # END GOOOGLE-INTERNAL
     if config.tpu_config.per_host_input_for_training:
       num_partitions = max(config.tpu_config.num_shards // 8, 1)
     else:

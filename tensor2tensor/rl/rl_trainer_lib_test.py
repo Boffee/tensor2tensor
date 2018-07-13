@@ -49,7 +49,7 @@ class TrainTest(tf.test.TestCase):
                        standard_atari_env_spec("CartPole-v0"))
     rl_trainer_lib.train(hparams)
 
-  # This test should sucessfully train pong.
+  # This test should successfully train pong.
   # It should get train mean_score around 0 after 200 epoch
   # By default the test is disabled to avoid travis timeouts
   def test_train_pong(self):

@@ -21,12 +21,13 @@ from __future__ import print_function
 
 # We need gym_utils for the game environments defined there.
 from tensor2tensor.data_generators import gym_utils  # pylint: disable=unused-import
+# pylint: disable=g-multiple-import
 from tensor2tensor.data_generators.gym_problems import GymDiscreteProblem,\
   GymSimulatedDiscreteProblem, GymRealDiscreteProblem, \
   GymDiscreteProblemWithAutoencoder, GymDiscreteProblemAutoencoded, \
   GymSimulatedDiscreteProblemAutoencoded
+# pylint: enable=g-multiple-import
 from tensor2tensor.utils import registry
-
 
 
 @registry.register_problem
@@ -152,6 +153,12 @@ class GymDiscreteProblemWithAgentOnPong(GymRealDiscreteProblem, GymPongRandom):
 
 
 @registry.register_problem
+class GymDiscreteProblemWithAgentOnFreeway(GymRealDiscreteProblem,
+                                           GymFreewayRandom):
+  pass
+
+
+@registry.register_problem
 class GymSimulatedDiscreteProblemWithAgentOnWrappedPong(
     GymSimulatedDiscreteProblem, GymWrappedPongRandom):
   """Similated pong."""
@@ -200,6 +207,7 @@ class GymSimulatedDiscreteProblemWithAgentOnWrappedLongPong(
 @registry.register_problem
 class GymSimulatedDiscreteProblemWithAgentOnWrappedLongPongAutoencoded(
     GymSimulatedDiscreteProblemAutoencoded, GymWrappedLongPongRandom):
+  """GymSimulatedDiscreteProblemWithAgentOnWrappedLongPongAutoencoded."""
 
   @property
   def initial_frames_problem(self):
@@ -208,7 +216,6 @@ class GymSimulatedDiscreteProblemWithAgentOnWrappedLongPongAutoencoded(
   @property
   def num_testing_steps(self):
     return 100
-
 
 
 @registry.register_problem
@@ -255,6 +262,7 @@ class GymDiscreteProblemWithAgentOnWrappedPong(GymRealDiscreteProblem,
   @property
   def frame_width(self):
     return 160
+
 
 @registry.register_problem
 class GymDiscreteProblemWithAgentOnWrappedPongAe(  # With autoencoder.
