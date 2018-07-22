@@ -57,7 +57,7 @@ def summarize_video_metrics(hook_args):
       metrics_results = video_metrics.compute_video_metrics_from_predictions(
           predictions)
     else:
-      metrics_results, _ = video_metrics.compute_video_metrics(
+      metrics_results, _ = video_metrics.compute_video_metrics_from_png_files(
           output_dirs, problem_name,
           hparams.video_num_target_frames, frame_shape)
 
@@ -185,7 +185,8 @@ class VideoProblem(problem.Problem):
 
     return data_fields, data_items_to_decoders
 
-  def preprocess(self, dataset, mode, hparams):
+  def preprocess(self, dataset, mode, hparams, interleave=True):
+    del interleave
     def split_on_batch(x):
       """Split x on batch dimension into x[:size, ...] and x[size:, ...]."""
       length = len(x.get_shape())

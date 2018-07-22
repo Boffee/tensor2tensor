@@ -18,6 +18,7 @@ from __future__ import division
 from __future__ import print_function
 import collections
 import functools
+import multiprocessing
 import os
 import random
 
@@ -27,6 +28,7 @@ from tensor2tensor.data_generators import text_encoder
 from tensor2tensor.utils import data_reader
 from tensor2tensor.utils import metrics
 import tensorflow as tf
+from tensorflow.contrib.tpu.python.tpu import tpu_config
 
 
 
@@ -100,20 +102,28 @@ class SpaceID(object):
   STROKES = 29
   # Pickled Python
   PICKLED_PYTHON = 30
+
+
+class TaskID(object):
+  """Problem specific task ids. Add more as needed."""
+  # English characters
+  EN_CHR = 0
   # English characters sentiment
-  EN_CHR_SENT = 31
+  EN_CHR_SENT = 1
   # English Premise Hypothesis pair
-  EN_PR_HYP = 32
+  EN_PR_HYP = 2
   # English NLI
-  EN_NLI = 33
+  EN_NLI = 3
   # COLA
-  COLA = 34
+  COLA = 4
   # Enligh Question Context pair
-  EN_Q_CONT = 35
+  EN_Q_CONT = 5
   # English similarity task
-  EN_SIM = 36
+  EN_SIM = 6
+  # English sentence pair
+  EN_SENT_PAIR = 7
   # 3 class NLI
-  THREE_CL_NLI = 37
+  THREE_CL_NLI = 8
 
 
 def default_model_hparams():
@@ -159,6 +169,12 @@ def _file_num_records_cached(filename):
 
 
 _file_num_records_cache = {}
+
+
+def cpu_count():
+  """Return the number of available cores."""
+  num_available_cores = multiprocessing.cpu_count()
+  return num_available_cores
 
 
 class Problem(object):
@@ -337,7 +353,7 @@ class Problem(object):
   # END SUBCLASS INTERFACE
   # ============================================================================
 
-  def preprocess(self, dataset, mode, hparams):
+  def preprocess(self, dataset, mode, hparams, interleave=True):
     """Runtime preprocessing on the whole dataset.
 
     Return a tf.data.Datset -- the preprocessed version of the given one.
@@ -347,6 +363,9 @@ class Problem(object):
       dataset: the Dataset of already decoded but not yet preprocessed features.
       mode: tf.estimator.ModeKeys
       hparams: HParams, model hyperparameters
+      interleave: bool, whether to use parallel_interleave, which is faster
+        but will alter the order of samples non-deterministically, or flat_map,
+        which is slower but will preserve the sample order.
 
     Returns:
       a Dataset
@@ -357,10 +376,12 @@ class Problem(object):
         examples = tf.data.Dataset.from_tensors(examples)
       return examples
 
-    is_training = mode == tf.estimator.ModeKeys.TRAIN
-    dataset = dataset.apply(
-        tf.contrib.data.parallel_interleave(
-            _preprocess, sloppy=is_training, cycle_length=8))
+    if interleave:
+      dataset = dataset.apply(
+          tf.contrib.data.parallel_interleave(
+              _preprocess, sloppy=True, cycle_length=8))
+    else:
+      dataset = dataset.flat_map(_preprocess)
 
     return dataset
 
@@ -466,18 +487,24 @@ class Problem(object):
     """Reverse features between inputs and targets if the problem is '_rev'."""
     if not self._was_reversed:
       return
-    inputs, targets = feature_map["inputs"], feature_map["targets"]
-    feature_map["inputs"], feature_map["targets"] = targets, inputs
-    if "inputs_segmentation" in feature_map:
-      inputs_seg = feature_map["inputs_segmentation"]
-      targets_seg = feature_map["targets_segmentation"]
-      feature_map["inputs_segmentation"] = targets_seg
+    inputs = feature_map.pop("inputs", None)
+    targets = feature_map.pop("targets", None)
+    inputs_seg = feature_map.pop("inputs_segmentation", None)
+    targets_seg = feature_map.pop("targets_segmentation", None)
+    inputs_pos = feature_map.pop("inputs_position", None)
+    targets_pos = feature_map.pop("targets_position", None)
+    if inputs is not None:
+      feature_map["targets"] = inputs
+    if targets is not None:
+      feature_map["inputs"] = targets
+    if inputs_seg is not None:
       feature_map["targets_segmentation"] = inputs_seg
-    if "inputs_position" in feature_map:
-      inputs_pos = feature_map["inputs_position"]
-      targets_pos = feature_map["targets_position"]
-      feature_map["inputs_position"] = targets_pos
+    if targets_seg is not None:
+      feature_map["inputs_segmentation"] = targets_seg
+    if inputs_pos is not None:
       feature_map["targets_position"] = inputs_pos
+    if targets_pos is not None:
+      feature_map["inputs_position"] = targets_pos
 
   def maybe_copy_features(self, feature_map):
     if not self._was_copy:
@@ -560,6 +587,7 @@ class Problem(object):
     # Functions used in dataset transforms below. `filenames` can be either a
     # `tf.string` tensor or `tf.data.Dataset` containing one or more filenames.
     def _load_records_and_preprocess(filenames):
+      """Reads files from a string tensor or a dataset of filenames."""
       # Load records from file(s) with an 8MiB read buffer.
       dataset = tf.data.TFRecordDataset(filenames, buffer_size=8 * 1024 * 1024)
       # Decode.
@@ -567,7 +595,8 @@ class Problem(object):
       # Preprocess if requested.
       # Note that preprocessing should happen per-file as order may matter.
       if preprocess:
-        dataset = self.preprocess(dataset, mode, hparams)
+        dataset = self.preprocess(dataset, mode, hparams,
+                                  interleave=shuffle_files)
       return dataset
 
     if len(data_files) < num_partitions:
@@ -723,15 +752,14 @@ class Problem(object):
       # Reset in the case when using TPU but alternating TRAIN and EVAL.
       self._next_partition_id = 0
       return 0, 1
+    phift = config.tpu_config.per_host_input_for_training
     # BEGIN GOOGLE-INTERNAL
-    # make mesh-tensorflow on TPU work with patch CL/202825176
-    # TODO(ylc): fix this once TPU estimator changes are checked in.
-    if getattr(config.tpu_config, "symmetric_sharding_enabled", False):
-      tf.logging.info("symmetric_sharding_enabled")
-      self._next_partition_id = 0
+    # This is the mesh-tensorflow case.  Still requires patch of cl/204685944
+    if (hasattr(tpu_config.InputPipelineConfig, "BROADCAST") and
+        phift == tpu_config.InputPipelineConfig.BROADCAST):
       return 0, 1
     # END GOOOGLE-INTERNAL
-    if config.tpu_config.per_host_input_for_training:
+    if phift:
       num_partitions = max(config.tpu_config.num_shards // 8, 1)
     else:
       num_partitions = config.tpu_config.num_shards
@@ -770,7 +798,7 @@ class Problem(object):
     if config and config.use_tpu:
       num_threads = 64
     else:
-      num_threads = 4 if is_training else 1
+      num_threads = cpu_count() if is_training else 1
 
     max_length = self.max_length(hparams)
 
@@ -987,22 +1015,33 @@ def _reverse_problem_hparams(p_hparams):
   p = p_hparams
 
   # Swap modalities.
-  input_modality = p.input_modality["inputs"]
+  input_modality = p.input_modality.get("inputs")
   target_modality = p.target_modality
-  p.input_modality["inputs"] = target_modality
   p.target_modality = input_modality
+  if target_modality is not None:
+    p.input_modality["inputs"] = target_modality
+  else:
+    p.input_modality = {}
 
   # Swap vocabularies.
-  input_vocabulary = p.vocabulary["inputs"]
-  target_vocabulary = p.vocabulary["targets"]
-  p.vocabulary["inputs"] = target_vocabulary
-  p.vocabulary["targets"] = input_vocabulary
+  input_vocabulary = p.vocabulary.pop("inputs", None)
+  target_vocabulary = p.vocabulary.pop("targets", None)
+  if input_vocabulary is not None:
+    p.vocabulary["targets"] = input_vocabulary
+  if target_vocabulary is not None:
+    p.vocabulary["inputs"] = target_vocabulary
 
   # Swap input/target space ids.
   input_space_id = p.input_space_id
   target_space_id = p.target_space_id
-  p.input_space_id = target_space_id
-  p.target_space_id = input_space_id
+  if input_space_id is not None:
+    p.target_space_id = input_space_id
+  else:
+    p.target_space_id = SpaceID.GENERIC
+  if target_space_id is not None:
+    p.input_space_id = target_space_id
+  else:
+    p.input_space_id = SpaceID.GENERIC
 
   # Mark that p was reversed.
   p.was_reversed = True
@@ -1132,4 +1171,3 @@ def skip_random_fraction(dataset, data_file):
   # replicas reading the same data in lock-step.
   num_skip = random.randint(0, _file_num_records_cached(data_file))
   return dataset.skip(num_skip)
-

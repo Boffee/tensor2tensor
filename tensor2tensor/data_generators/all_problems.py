@@ -27,6 +27,7 @@ MODULES = [
     "tensor2tensor.data_generators.babi_qa",
     "tensor2tensor.data_generators.bair_robot_pushing",
     "tensor2tensor.data_generators.celeba",
+    "tensor2tensor.data_generators.celebahq",
     "tensor2tensor.data_generators.cifar",
     "tensor2tensor.data_generators.cipher",
     "tensor2tensor.data_generators.cnn_dailymail",
@@ -34,6 +35,7 @@ MODULES = [
     "tensor2tensor.data_generators.common_voice",
     "tensor2tensor.data_generators.desc2code",
     "tensor2tensor.data_generators.fsns",
+    "tensor2tensor.data_generators.function_docstring",
     "tensor2tensor.data_generators.gene_expression",
     "tensor2tensor.data_generators.google_robot_pushing",
     "tensor2tensor.data_generators.gym_problems_specs",
@@ -50,6 +52,7 @@ MODULES = [
     "tensor2tensor.data_generators.multinli",
     "tensor2tensor.data_generators.program_search",
     "tensor2tensor.data_generators.ocr",
+    "tensor2tensor.data_generators.pointer_generator_word",
     "tensor2tensor.data_generators.problem_hparams",
     "tensor2tensor.data_generators.ptb",
     "tensor2tensor.data_generators.qnli",
@@ -83,7 +86,11 @@ ALL_MODULES = list(MODULES)
 
 def _py_err_msg(module):
   if six.PY2:
-    msg = "No module named %s" % module.split(".")[-1]
+    # Py2 error will reference the module relative to the current module
+    shared_module = "data_generators."
+    start_idx = module.index(shared_module) + len(shared_module)
+    err_name = module[start_idx:]
+    msg = "No module named %s" % err_name
   else:
     msg = "No module named '%s'" % module
   return msg
