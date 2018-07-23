@@ -36,6 +36,7 @@ class DatasetSplit(object):
   TRAIN = tf.estimator.ModeKeys.TRAIN
   EVAL = tf.estimator.ModeKeys.EVAL
   TEST = "test"
+  ADHOC = "adhoc"
 
 
 class SpaceID(object):
@@ -237,6 +238,9 @@ class Problem(object):
   def generate_data(self, data_dir, tmp_dir, task_id=-1):
     raise NotImplementedError()
 
+  def generate_data_adhoc(self, data_dir, tmp_dir, task_id=-1):
+    raise NotImplementedError()
+
   @property
   def multiprocess_generate(self):
     """Whether to generate the data in multiple parallel processes."""
@@ -406,6 +410,13 @@ class Problem(object):
     return generator_utils.test_data_filenames(file_basename, data_dir,
                                                num_shards)
 
+  def adhoc_filepaths(self, data_dir, num_shards, shuffled):
+    file_basename = self.dataset_filename()
+    if not shuffled:
+      file_basename += generator_utils.UNSHUFFLED_SUFFIX
+    return generator_utils.adhoc_data_filenames(file_basename, data_dir,
+                                               num_shards)
+
   def filepattern(self, data_dir, mode, shard=None):
     """Get filepattern for data files for mode.
 
@@ -413,6 +424,7 @@ class Problem(object):
     * DatasetSplit.TRAIN: train
     * DatasetSplit.EVAL: dev
     * DatasetSplit.TEST: test
+    * DatasetSplit.ADHOC: adhoc 
     * tf.estimator.ModeKeys.PREDICT: dev
 
     Args:
@@ -429,6 +441,8 @@ class Problem(object):
       suffix = "train"
     elif mode in [DatasetSplit.EVAL, tf.estimator.ModeKeys.PREDICT]:
       suffix = "dev"
+    elif mode == DatasetSplit.ADHOC:
+      suffix = "adhoc"
     else:
       assert mode == DatasetSplit.TEST
       suffix = "test"

@@ -61,7 +61,9 @@ flags.DEFINE_integer("decode_shards", 1, "Number of decoding replicas.")
 flags.DEFINE_string("score_file", "", "File to score. Each line in the file "
                     "must be in the format input \t target.")
 flags.DEFINE_bool("decode_in_memory", False, "Decode in memory.")
-
+flags.DEFINE_bool("eval_use_adhoc_set", False,
+                  "If true and `eval_use_test_set` is false,"
+                  "generate adhoc dataset for problem.")
 
 def create_hparams():
   return trainer_lib.create_hparams(
@@ -96,13 +98,19 @@ def decode(estimator, hparams, decode_hp):
       ckpt_time = os.path.getmtime(FLAGS.checkpoint_path + ".index")
       os.utime(FLAGS.decode_to_file, (ckpt_time, ckpt_time))
   else:
+    if FLAGS.eval_use_test_set:
+      dataset_split = problem.DatasetSplit.TEST
+    elif FLAGS.eval_use_adhoc_set:
+      dataset_split = problem.DatasetSplit.ADHOC
+    else:
+      dataset_split = None
     decoding.decode_from_dataset(
         estimator,
         FLAGS.problem,
         hparams,
         decode_hp,
         decode_to_file=FLAGS.decode_to_file,
-        dataset_split="test" if FLAGS.eval_use_test_set else None)
+        dataset_split=dataset_split)
 
 
 def score_file(filename):

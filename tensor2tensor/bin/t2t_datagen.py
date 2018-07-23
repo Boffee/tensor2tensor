@@ -76,6 +76,8 @@ flags.DEFINE_string("t2t_usr_dir", "",
                     "The imported files should contain registrations, "
                     "e.g. @registry.register_problem calls, that will then be "
                     "available to t2t-datagen.")
+flags.DEFINE_bool("adhoc", False,
+                  "If true, generate adhoc dataset for problem.")
 
 # Mapping from problems that we can generate data for to their generators.
 # pylint: disable=g-long-lambda
@@ -215,7 +217,7 @@ def generate_data_for_registered_problem(problem_name):
   task_id = None if FLAGS.task_id < 0 else FLAGS.task_id
   data_dir = os.path.expanduser(FLAGS.data_dir)
   tmp_dir = os.path.expanduser(FLAGS.tmp_dir)
-  if task_id is None and problem.multiprocess_generate:
+  if task_id is None and problem.multiprocess_generate and not FLAGS.adhoc:
     if FLAGS.task_id_start != -1:
       assert FLAGS.task_id_end != -1
       task_id_start = FLAGS.task_id_start
@@ -229,7 +231,11 @@ def generate_data_for_registered_problem(problem_name):
             for task_id in range(task_id_start, task_id_end)]
     pool.map(generate_data_in_process, args)
   else:
-    problem.generate_data(data_dir, tmp_dir, task_id)
+    if FLAGS.adhoc:
+      problem.generate_data_adhoc(data_dir, tmp_dir, task_id)
+    else:
+      problem.generate_data(data_dir, tmp_dir, task_id)
+
 
 if __name__ == "__main__":
   tf.logging.set_verbosity(tf.logging.INFO)
