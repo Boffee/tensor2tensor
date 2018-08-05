@@ -105,6 +105,10 @@ def test_data_filenames(problem, output_dir, num_shards):
   return _data_filenames(problem + "-test", output_dir, num_shards)
 
 
+def adhoc_data_filenames(problem, output_dir, num_shards):
+  return _data_filenames(problem + "-adhoc", output_dir, num_shards)
+
+
 def combined_data_filenames(problem, output_dir, num_training_shards):
   return (train_data_filenames(problem, output_dir, num_training_shards) +
           dev_data_filenames(problem, output_dir, 1) + test_data_filenames(
