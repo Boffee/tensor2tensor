@@ -107,23 +107,23 @@ class SpaceID(object):
 class TaskID(object):
   """Problem specific task ids. Add more as needed."""
   # English characters
-  EN_CHR = 0
+  EN_CHR = 2
   # English characters sentiment
-  EN_CHR_SENT = 1
+  EN_CHR_SENT = 3
   # English Premise Hypothesis pair
-  EN_PR_HYP = 2
+  EN_PR_HYP = 4
   # English NLI
-  EN_NLI = 3
+  EN_NLI = 5
   # COLA
-  COLA = 4
+  COLA = 6
   # Enligh Question Context pair
-  EN_Q_CONT = 5
+  EN_Q_CONT = 7
   # English similarity task
-  EN_SIM = 6
+  EN_SIM = 8
   # English sentence pair
-  EN_SENT_PAIR = 7
+  EN_SENT_PAIR = 9
   # 3 class NLI
-  THREE_CL_NLI = 8
+  THREE_CL_NLI = 10
 
 
 def default_model_hparams():
@@ -139,14 +139,14 @@ def preprocess_example_common(example, hparams, mode):
   """Preprocessing steps common to all models."""
   if hparams.max_input_seq_length > 0:
     example["inputs"] = example["inputs"][:hparams.max_input_seq_length]
-  if hparams.max_target_seq_length > 0:
-    example["targets"] = example["targets"][:hparams.max_target_seq_length]
   if hparams.prepend_mode != "none":
     if mode == tf.estimator.ModeKeys.PREDICT:
       example["partial_targets"] = tf.concat([example["inputs"], [0]], 0)
     else:
       example["targets"] = tf.concat(
           [example["inputs"], [0], example["targets"]], 0)
+  if hparams.max_target_seq_length > 0:
+    example["targets"] = example["targets"][:hparams.max_target_seq_length]
   if hparams.split_to_length:
     example["targets"] = tf.reshape(example["targets"],
                                     [-1, hparams.split_to_length, 1, 1])
@@ -349,6 +349,15 @@ class Problem(object):
         metrics.Metrics.ACC_PER_SEQ, metrics.Metrics.NEG_LOG_PERPLEXITY
     ]
 
+  @property
+  def task_id(self):
+    if self._task_id == -1 and hasattr(self, "global_task_id"):
+      self._task_id = self.global_task_id()
+    return self._task_id
+
+  def set_task_id(self, new_task_id):
+    self._task_id = new_task_id
+
   # ============================================================================
   # END SUBCLASS INTERFACE
   # ============================================================================
@@ -449,6 +458,7 @@ class Problem(object):
     self._encoders = None
     self._hparams = None
     self._feature_info = None
+    self._task_id = -1
 
   def get_feature_encoders(self, data_dir=None):
     if self._encoders is None:
@@ -617,17 +627,7 @@ class Problem(object):
           tf.contrib.data.parallel_interleave(
               _load_records_and_preprocess, sloppy=True, cycle_length=8))
     else:
-      # TFRecordDataset can get filenames as dataset in TF 1.7+.
-      # TODO(lukaszkaiser): remove when we require TF 1.7+ in general.
-      major, minor = [int(el) for el in tf.__version__.split(".")[:2]]
-      filename_dataset_ok = major > 1 or (major == 1 and minor >= 7)
-      if filename_dataset_ok:  # We can just pass a Dataset of filenames.
-        dataset = _load_records_and_preprocess(dataset)
-      else:  # Go file-by-file (can be very slow).
-        dataset = None
-        for f in data_files:
-          f_data = _load_records_and_preprocess(f)
-          dataset = f_data if dataset is None else dataset.concatenate(f_data)
+      dataset = _load_records_and_preprocess(dataset)
 
     dataset = dataset.map(
         self.maybe_reverse_and_copy, num_parallel_calls=num_threads)

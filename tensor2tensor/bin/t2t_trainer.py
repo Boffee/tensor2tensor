@@ -31,7 +31,6 @@ from tensor2tensor.utils import registry
 from tensor2tensor.utils import trainer_lib
 from tensor2tensor.utils import usr_dir
 import tensorflow as tf
-from tensorflow.contrib.tpu.python.tpu import tpu_config
 
 
 flags = tf.flags
@@ -201,6 +200,7 @@ def create_run_config(hp):
       hp.weight_dtype == "float32")
   return trainer_lib.create_run_config(
       model_dir=os.path.expanduser(FLAGS.output_dir),
+      warm_start_from=FLAGS.warm_start_from,
       master=FLAGS.master,
       iterations_per_loop=FLAGS.iterations_per_loop,
       num_shards=FLAGS.tpu_num_shards,
