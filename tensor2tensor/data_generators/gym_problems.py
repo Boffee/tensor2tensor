@@ -48,13 +48,13 @@ flags.DEFINE_string("autoencoder_path", None,
 
 def standard_atari_env_spec(env):
   """Parameters of environment specification."""
-  standard_wrappers = [[tf_atari_wrappers.StackAndSkipWrapper, {"skip": 4}]]
+  standard_wrappers = [[tf_atari_wrappers.StackWrapper, {"history": 4}]]
   env_lambda = None
   if isinstance(env, str):
     env_lambda = lambda: gym.make(env)
   if callable(env):
     env_lambda = env
-  assert env is not None, "Unknown specification of environment"
+  assert env_lambda is not None, "Unknown specification of environment"
 
   return tf.contrib.training.HParams(
       env_lambda=env_lambda, wrappers=standard_wrappers, simulated_env=False)
@@ -149,6 +149,8 @@ class GymDiscreteProblem(video_utils.VideoProblem):
       memory_index = 0
       memory = None
       pieces_generated = 0
+      prev_reward = 0
+      prev_done = False
 
       # TODO(piotrmilos): self.settable_eval_phase possibly violates sematics
       # of VideoProblem
@@ -171,8 +173,8 @@ class GymDiscreteProblem(video_utils.VideoProblem):
             "image/height": [self.frame_height],
             "image/width": [self.frame_width],
             "action": [int(action)],
-            "done": [int(done)],
-            "reward": [int(reward - self.min_reward)]
+            "done": [int(prev_done)],
+            "reward": [int(prev_reward - self.min_reward)]
         }
 
         if debug_image is not None:
@@ -182,6 +184,8 @@ class GymDiscreteProblem(video_utils.VideoProblem):
 
         if done and self.settable_eval_phase:
           return
+
+        prev_done, prev_reward = done, reward
 
         pieces_generated += 1
         frame_counter += 1

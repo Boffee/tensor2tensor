@@ -18,6 +18,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import json
 import os
 import random
 import numpy as np
@@ -97,9 +98,13 @@ def create_hparams(hparams_set,
   return hparams
 
 
+def is_cloud_async_distributed():
+  return ("chief" in
+          json.loads(os.environ.get("TF_CONFIG", "{}")).get("cluster", {}))
+
+
 def create_run_config(master="",
                       model_dir=None,
-                      warm_start_from=None,
                       iterations_per_loop=1000,
                       num_shards=8,
                       log_device_placement=False,
@@ -125,10 +130,12 @@ def create_run_config(master="",
                       sync=False,
                       tpu_infeed_sleep_secs=None,
                       use_tpu=False,
+                      use_tpu_estimator=False,
                       inter_op_parallelism_threads=0,
                       log_step_count_steps=100,
                       intra_op_parallelism_threads=0,
-                      tpu_config_extra_kwargs=None):
+                      tpu_config_extra_kwargs=None,
+                      cloud_tpu_name=""):
   """Create RunConfig, TPUConfig, and Parallelism object."""
   session_config = create_session_config(
       log_device_placement=log_device_placement,
@@ -154,8 +161,9 @@ def create_run_config(master="",
     del run_config_args["save_checkpoints_steps"]
   run_config_cls = tf.contrib.learn.RunConfig
 
-  # If using TPU, use TPU RunConfig, add TPUConfig, and add additional args
-  if use_tpu:
+  if use_tpu or use_tpu_estimator:
+    # If using TPUEstimator, use TPU RunConfig, add TPUConfig, and add
+    # additional args.
     tpu_config_kwargs = {
         "iterations_per_loop": iterations_per_loop,
         "num_shards": num_shards,
@@ -174,9 +182,20 @@ def create_run_config(master="",
       run_config_args["master"] = os.environ[
           "KUBE_GOOGLE_CLOUD_TPU_ENDPOINTS"]
       run_config_args["evaluation_master"] = run_config_args["master"]
+    elif not master and cloud_tpu_name:
+      # Update run_config to use cluster instead of master/evaluation_master
+      # as we need the cluster spec to use Cloud Pods
+      tpu_cluster_resolver = tf.contrib.cluster_resolver.TPUClusterResolver(
+          cloud_tpu_name)
+      run_config_args["cluster"] = tpu_cluster_resolver
+      del run_config_args["master"]
+      del run_config_args["evaluation_master"]
+  elif is_cloud_async_distributed():
+    run_config_cls = tf.estimator.RunConfig
+    del run_config_args["master"]
+    del run_config_args["evaluation_master"]
 
   config = run_config_cls(**run_config_args)
-  config.warm_start_from = warm_start_from
 
   # If not using TPU, add device info for data_parallelism
   config.use_tpu = use_tpu
@@ -207,12 +226,15 @@ def create_estimator(model_name,
                      run_config,
                      schedule="train_and_evaluate",
                      decode_hparams=None,
-                     use_tpu=False):
+                     use_tpu=False,
+                     use_tpu_estimator=False,
+                     use_xla=False):
   """Create a T2T Estimator."""
   model_fn = t2t_model.T2TModel.make_estimator_model_fn(
-      model_name, hparams, decode_hparams=decode_hparams, use_tpu=use_tpu)
+      model_name, hparams, decode_hparams=decode_hparams)
 
-  if use_tpu:
+  del use_xla
+  if use_tpu or use_tpu_estimator:
     problem = hparams.problem
     batch_size = (
         problem.tpu_batch_size_per_shard(hparams) *
@@ -226,6 +248,7 @@ def create_estimator(model_name,
         model_fn=model_fn,
         model_dir=run_config.model_dir,
         config=run_config,
+        use_tpu=use_tpu,
         train_batch_size=batch_size,
         eval_batch_size=batch_size if "eval" in schedule else None,
         predict_batch_size=predict_batch_size)
@@ -234,7 +257,6 @@ def create_estimator(model_name,
         model_fn=model_fn,
         model_dir=run_config.model_dir,
         config=run_config,
-        warm_start_from=run_config.warm_start_from
     )
   return estimator
 
@@ -365,19 +387,11 @@ class T2TExperiment(object):
       ValueError: if not enough information is available in the estimator's
         config to create a server.
     """
-    config = self._estimator.config
-    if (not config.cluster_spec or not config.task_type or not config.master or
-        config.task_id is None):
-      raise ValueError("Could not start server; be sure to specify "
-                       "cluster_spec, task_type, master, and task in "
-                       "RunConfig or set the TF_CONFIG environment variable.")
+    config = tf.estimator.RunConfig()
     server = tf.train.Server(
         config.cluster_spec,
         job_name=config.task_type,
-        task_index=config.task_id,
-        config=config.tf_config,
-        start=False)
-    server.start()
+        task_index=config.task_id)
     server.join()
 
   def decode(self):
@@ -412,8 +426,11 @@ def create_experiment(
     eval_early_stopping_metric_minimize=True,
     autotune=False,
     use_tpu=False,
+    use_tpu_estimator=False,
+    use_xla=False,
     additional_train_hooks=None,
-    additional_eval_hooks=None):
+    additional_eval_hooks=None,
+    warm_start_from=None):
   """Create Experiment."""
   # HParams
   hparams.add_hparam("model_dir", run_config.model_dir)
@@ -421,6 +438,7 @@ def create_experiment(
   hparams.add_hparam("train_steps", train_steps)
   hparams.add_hparam("eval_steps", eval_steps)
   hparams.add_hparam("schedule", schedule)
+  hparams.add_hparam("warm_start_from", warm_start_from)
   add_problem_hparams(hparams, problem_name)
 
   # Estimator
@@ -430,7 +448,9 @@ def create_experiment(
       run_config,
       schedule=schedule,
       decode_hparams=decode_hparams,
-      use_tpu=use_tpu)
+      use_tpu=use_tpu,
+      use_tpu_estimator=use_tpu_estimator,
+      use_xla=use_xla)
 
   # Input fns from Problem
   problem = hparams.problem
@@ -440,9 +460,17 @@ def create_experiment(
                                                   hparams)
 
   # Export
+  exporter = None
   if export:
-    tf.logging.warn("Exporting from the trainer is deprecated. "
-                    "See serving/export.py.")
+    def compare_fn(best_eval_result, current_eval_result):
+      metric = eval_early_stopping_metric or "loss"
+      return current_eval_result[metric] < best_eval_result[metric]
+
+    exporter = tf.estimator.BestExporter(
+        name="best",
+        serving_input_receiver_fn=lambda: problem.serving_input_fn(hparams),
+        compare_fn=compare_fn,
+        assets_extra=problem.export_assets)
 
   # Hooks
   validation_monitor_kwargs = dict(
@@ -460,6 +488,10 @@ def create_experiment(
       plateau_decrease=eval_early_stopping_metric_minimize,
       plateau_delta=eval_early_stopping_metric_delta,
       every_n_steps=min_eval_frequency)
+
+  # Eval on TPU Pods is not supported yet
+  if use_tpu and run_config.tpu_config.num_shards > 8 and "eval" in schedule:
+    raise ValueError("Eval is not currently supported on a TPU Pod")
 
   # In-process eval (and possible early stopping)
   if schedule == "continuous_train_and_eval" and min_eval_frequency:
@@ -498,7 +530,8 @@ def create_experiment(
       steps=eval_steps,
       hooks=eval_hooks,
       start_delay_secs=0 if hparams.schedule == "evaluate" else 120,
-      throttle_secs=eval_throttle_seconds)
+      throttle_secs=eval_throttle_seconds,
+      exporters=exporter)
 
   if autotune:
     hooks_kwargs = {"train_monitors": train_hooks, "eval_hooks": eval_hooks}

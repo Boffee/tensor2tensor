@@ -20,11 +20,14 @@ from __future__ import print_function
 import numpy as np
 
 from tensor2tensor.data_generators import video_generated  # pylint: disable=unused-import
-from tensor2tensor.models.research import next_frame
+from tensor2tensor.models.research import next_frame_basic_deterministic
+from tensor2tensor.models.research import next_frame_basic_deterministic_params
+from tensor2tensor.models.research import next_frame_basic_stochastic
 from tensor2tensor.models.research import next_frame_emily
-from tensor2tensor.models.research import next_frame_params
 from tensor2tensor.models.research import next_frame_savp
+from tensor2tensor.models.research import next_frame_savp_params
 from tensor2tensor.models.research import next_frame_sv2p
+from tensor2tensor.models.research import next_frame_sv2p_params
 from tensor2tensor.utils import registry
 
 import tensorflow as tf
@@ -102,7 +105,7 @@ def get_tensor_shape(tensor):
 class NextFrameTest(tf.test.TestCase):
 
   def RunModel(self, model, hparams, features):
-    with self.test_session() as session:
+    with tf.Session() as session:
       model = model(
           hparams, tf.estimator.ModeKeys.TRAIN)
       logits, _ = model(features)
@@ -191,60 +194,72 @@ class NextFrameTest(tf.test.TestCase):
     self.TestVideoModel(4, 1, hparams, model, expected_last_dim,
                         upsample_method="nn_upsample_conv")
 
-  def testBasic(self):
+  def testBasicDeterministic(self):
     self.TestOnVariousInputOutputSizes(
-        next_frame_params.next_frame(),
-        next_frame.NextFrameBasic,
+        next_frame_basic_deterministic_params.next_frame_basic_deterministic(),
+        next_frame_basic_deterministic.NextFrameBasicDeterministic,
         256)
 
-  def testStochastic(self):
+  def testBasicStochastic(self):
     self.TestOnVariousInputOutputSizes(
-        next_frame_params.next_frame_stochastic(),
-        next_frame_sv2p.NextFrameStochastic,
+        next_frame_basic_stochastic.next_frame_basic_stochastic(),
+        next_frame_basic_stochastic.NextFrameBasicStochastic,
+        256)
+
+  def testSv2p(self):
+    self.TestOnVariousInputOutputSizes(
+        next_frame_sv2p_params.next_frame_sv2p(),
+        next_frame_sv2p.NextFrameSv2p,
         1)
 
-  def testStochasticWithActionsAndRewards(self):
+  def testSv2pWithActionsAndRewards(self):
     self.TestWithActionAndRewards(
-        next_frame_params.next_frame_stochastic(),
-        next_frame_sv2p.NextFrameStochastic,
+        next_frame_sv2p_params.next_frame_sv2p(),
+        next_frame_sv2p.NextFrameSv2p,
         1)
 
-  def testStochasticTwoFrames(self):
+  def testSv2pTwoFrames(self):
     self.TestOnVariousInputOutputSizes(
-        next_frame_params.next_frame_stochastic(),
-        next_frame_sv2p.NextFrameStochasticTwoFrames,
+        next_frame_sv2p_params.next_frame_sv2p(),
+        next_frame_sv2p.NextFrameSv2pTwoFrames,
         1)
 
-  def testStochasticEmily(self):
+  def testEmily(self):
     self.TestOnVariousInputOutputSizes(
-        next_frame_params.next_frame_stochastic_emily(),
-        next_frame_emily.NextFrameStochasticEmily,
+        next_frame_emily.next_frame_emily(),
+        next_frame_emily.NextFrameEmily,
         1)
 
-  def testStochasticSavp(self):
+  def testSavpVAE(self):
+    savp_hparams = next_frame_savp_params.next_frame_savp()
+    savp_hparams.use_vae = True
+    savp_hparams.use_gan = False
     self.TestOnVariousInputOutputSizes(
-        next_frame_params.next_frame_savp(),
-        next_frame_savp.NextFrameSAVP,
-        1)
+        savp_hparams, next_frame_savp.NextFrameSAVP, 1)
     self.TestOnVariousUpSampleLayers(
-        next_frame_params.next_frame_savp(),
-        next_frame_savp.NextFrameSAVP,
-        1)
+        savp_hparams, next_frame_savp.NextFrameSAVP, 1)
 
-  def testStochasticSavpGAN(self):
-    hparams = next_frame_params.next_frame_savp()
+  def testSavpGAN(self):
+    hparams = next_frame_savp_params.next_frame_savp()
     hparams.use_gan = True
     hparams.use_vae = False
     self.TestVideoModel(7, 5, hparams, next_frame_savp.NextFrameSAVP, 1)
 
-  def testStochasticInvalidVAEGANCombinations(self):
-    hparams = next_frame_params.next_frame_savp()
-    for use_vae, use_gan in [[True, True], [False, False]]:
-      hparams.use_gan = use_gan
-      hparams.use_vae = use_vae
-      self.assertRaises(ValueError, self.TestVideoModel,
-                        7, 5, hparams, next_frame_savp.NextFrameSAVP, 1)
+    hparams.gan_optimization = "sequential"
+    self.TestVideoModel(7, 5, hparams, next_frame_savp.NextFrameSAVP, 1)
 
+  def testSavpGANVAE(self):
+    hparams = next_frame_savp_params.next_frame_savp()
+    hparams.use_vae = True
+    hparams.use_gan = True
+    self.TestVideoModel(7, 5, hparams, next_frame_savp.NextFrameSAVP, 1)
+
+  def testInvalidVAEGANCombinations(self):
+    hparams = next_frame_savp_params.next_frame_savp()
+    hparams.use_gan = False
+    hparams.use_vae = False
+    self.assertRaises(ValueError, self.TestVideoModel,
+                      7, 5, hparams, next_frame_savp.NextFrameSAVP, 1)
 
 if __name__ == "__main__":
   tf.test.main()

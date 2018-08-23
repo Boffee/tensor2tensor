@@ -21,10 +21,11 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 import numbers
+import numpy as np
 
 from tensor2tensor.layers import common_layers
 from tensor2tensor.layers import common_video
-from tensor2tensor.models.research import next_frame_params  # pylint: disable=unused-import
+from tensor2tensor.models.research import next_frame_savp_params  # pylint: disable=unused-import
 from tensor2tensor.models.research import next_frame_sv2p
 from tensor2tensor.utils import registry
 from tensor2tensor.utils import update_ops_hook
@@ -34,7 +35,7 @@ gan_losses = tf.contrib.gan.losses.wargs
 
 
 @registry.register_model
-class NextFrameSAVP(next_frame_sv2p.NextFrameStochastic):
+class NextFrameSAVP(next_frame_sv2p.NextFrameSv2p):
   """Stochastic Adversarial Video Prediction."""
 
   def encoder(self, inputs, n_layers=3):
@@ -102,6 +103,19 @@ class NextFrameSAVP(next_frame_sv2p.NextFrameStochastic):
         z_log_var, (batch_size, -1, latent_dims))
     return z_mu, z_log_var
 
+  def expected_output_shape(self, input_shape, stride, padding, kernel_size):
+    return (input_shape + 2*padding - kernel_size) // stride + 1
+
+  def get_fc_dimensions(self, strides, kernel_sizes):
+    """Get expected fully connected shape after a series of convolutions."""
+    output_height, output_width, _ = self.hparams.problem.frame_shape
+    output_steps = self.hparams.video_num_target_frames
+    output_shape = np.array([output_steps, output_height, output_width])
+    for curr_stride, kernel_size in zip(strides, kernel_sizes):
+      output_shape = self.expected_output_shape(
+          output_shape, np.array(curr_stride), 1, kernel_size)
+    return np.prod(output_shape) * self.hparams.num_discriminator_filters * 8
+
   def discriminator(self, frames):
     """3-D SNGAN discriminator.
 
@@ -122,7 +136,9 @@ class NextFrameSAVP(next_frame_sv2p.NextFrameStochastic):
     # 3-D Conv-net mapping inputs to activations.
     num_outputs = [ndf, ndf*2, ndf*2, ndf*4, ndf*4, ndf*8, ndf*8]
     kernel_sizes = [3, 4, 3, 4, 3, 4, 3]
-    strides = [1, [1, 2, 2], 1, [1, 2, 2], 1, 2, 1]
+    strides = [[1, 1, 1], [1, 2, 2], [1, 1, 1], [1, 2, 2], [1, 1, 1],
+               [2, 2, 2], [1, 1, 1]]
+
     names = ["video_sn_conv0_0", "video_sn_conv0_1", "video_sn_conv1_0",
              "video_sn_conv1_1", "video_sn_conv2_0", "video_sn_conv2_1",
              "video_sn_conv3_0"]
@@ -131,10 +147,7 @@ class NextFrameSAVP(next_frame_sv2p.NextFrameStochastic):
     for num_filters, kernel_size, stride, name in iterable:
       activations = self.pad_conv3d_lrelu(activations, num_filters, kernel_size,
                                           stride, name)
-
-    # Flatten and apply fully-connected layer.
-    num_fc_dimensions = tf.reduce_prod(
-        common_layers.shape_list(activations)[1:])
+    num_fc_dimensions = self.get_fc_dimensions(strides, kernel_sizes)
     activations = tf.reshape(activations, (-1, num_fc_dimensions))
     return tf.squeeze(tf.layers.dense(activations, 1))
 
@@ -211,7 +224,7 @@ class NextFrameSAVP(next_frame_sv2p.NextFrameStochastic):
         discriminator_gen_outputs=fake_logits_stop, add_summaries=True)
     return gan_g_loss_pos_d, gan_g_loss_neg_d
 
-  def get_gan_loss(self, true_frames, gen_frames):
+  def get_gan_loss(self, true_frames, gen_frames, name):
     """Get the discriminator + generator loss at every step.
 
     This performs an 1:1 update of the discriminator and generator at every
@@ -222,39 +235,63 @@ class NextFrameSAVP(next_frame_sv2p.NextFrameStochastic):
                    Assumed to be ground truth.
       gen_frames: 5-D Tensor of shape (num_steps, batch_size, H, W, C)
                   Assumed to be fake.
+      name: discriminator scope.
     Returns:
       loss: 0-D Tensor, with d_loss + g_loss
     """
     # D - STEP
-    with tf.variable_scope("gan_discriminator", reuse=tf.AUTO_REUSE):
+    with tf.variable_scope("%s_discriminator" % name, reuse=tf.AUTO_REUSE):
       gan_d_loss, _, fake_logits_stop = self.d_step(
           true_frames, gen_frames)
 
     # G - STEP
-    with tf.variable_scope("gan_discriminator", reuse=True):
+    with tf.variable_scope("%s_discriminator" % name, reuse=True):
       gan_g_loss_pos_d, gan_g_loss_neg_d = self.g_step(
           gen_frames, fake_logits_stop)
     gan_g_loss = gan_g_loss_pos_d + gan_g_loss_neg_d
-    gan_loss = gan_g_loss + gan_d_loss
-    tf.summary.scalar("gan_loss", gan_g_loss_pos_d + gan_d_loss)
-    return self.hparams.gan_loss_multiplier * gan_loss
+    tf.summary.scalar("gan_loss_%s" % name, gan_g_loss_pos_d + gan_d_loss)
+
+    if self.hparams.gan_optimization == "joint":
+      gan_loss = gan_g_loss + gan_d_loss
+    else:
+      curr_step = tf.train.get_or_create_global_step()
+      gan_loss = tf.cond(
+          tf.logical_not(curr_step % 2 == 0), lambda: gan_g_loss,
+          lambda: gan_d_loss)
+    return gan_loss
 
   def get_extra_loss(self, latent_means=None, latent_stds=None,
                      true_frames=None, gen_frames=None, beta=1.0):
     if not self.is_training:
       return 0.0
+
+    vae_loss, d_vae_loss, d_gan_loss = 0.0, 0.0, 0.0
+    # Use next_frame_sv2p's KL divergence computation.
     if self.hparams.use_vae:
-      return super(NextFrameSAVP, self).get_extra_loss(
+      vae_loss = super(NextFrameSAVP, self).get_extra_loss(
           latent_means=latent_means, latent_stds=latent_stds, beta=beta)
-    elif self.hparams.use_gan:
+
+    if self.hparams.use_gan:
       # Strip out the first context_frames for the true_frames
       # Strip out the first context_frames - 1 for the gen_frames
       context_frames = self.hparams.video_num_input_frames
       true_frames = tf.stack(
           tf.unstack(true_frames, axis=0)[context_frames:])
-      gen_frames = tf.stack(
-          tf.unstack(gen_frames, axis=0)[context_frames-1:])
-      return self.get_gan_loss(true_frames, gen_frames)
+
+      # discriminator for VAE.
+      if self.hparams.use_vae:
+        gen_enc_frames = tf.stack(
+            tf.unstack(gen_frames, axis=0)[context_frames-1:])
+        d_vae_loss = self.get_gan_loss(true_frames, gen_enc_frames, name="vae")
+
+      # discriminator for GAN.
+      gen_prior_frames = tf.stack(
+          tf.unstack(self.gen_prior_video, axis=0)[context_frames-1:])
+      d_gan_loss = self.get_gan_loss(true_frames, gen_prior_frames, name="gan")
+
+    return (
+        vae_loss + self.hparams.gan_loss_multiplier * d_gan_loss +
+        self.hparams.gan_vae_loss_multiplier * d_vae_loss)
 
   def pad_conv3d_lrelu(self, activations, n_filters, kernel_size, strides,
                        scope):
@@ -314,10 +351,11 @@ class NextFrameSAVP(next_frame_sv2p.NextFrameStochastic):
       ValueError: If not exactly one of self.hparams.vae or self.hparams.gan
                   is set to True.
     """
-    if self.hparams.use_vae and self.hparams.use_gan:
-      raise ValueError("VAE + GAN variant not implemented")
     if not self.hparams.use_vae and not self.hparams.use_gan:
       raise ValueError("Set at least one of use_vae or use_gan to be True")
+    if self.hparams.gan_optimization not in ["joint", "sequential"]:
+      raise ValueError("self.hparams.gan_optimization should be either joint "
+                       "or sequential got %s" % self.hparams.gan_optimization)
 
     images = tf.unstack(images, axis=0)
     actions = tf.unstack(actions, axis=0)
@@ -359,7 +397,7 @@ class NextFrameSAVP(next_frame_sv2p.NextFrameStochastic):
 
       for step, (image, action, reward, mu, log_sigma_sq) in enumerate(iterable):  # pylint:disable=line-too-long
         # Sample latents using a gaussian centered at conditional mu and std.
-        latent = self.get_gaussian_latent(mu, log_sigma_sq)
+        latent = common_video.get_gaussian_tensor(mu, log_sigma_sq)
 
         # Sample prior latents from isotropic normal distribution.
         prior_latent = tf.random_normal(tf.shape(latent), dtype=tf.float32)
@@ -392,7 +430,7 @@ class NextFrameSAVP(next_frame_sv2p.NextFrameStochastic):
         cond_pred_images, prior_pred_images = \
           all_pred_images[:batch_size], all_pred_images[batch_size:]
 
-        if train_mode:
+        if train_mode and self.hparams.use_vae:
           pred_image = cond_pred_images
         else:
           pred_image = prior_pred_images
@@ -403,10 +441,10 @@ class NextFrameSAVP(next_frame_sv2p.NextFrameStochastic):
         latent_stds.append(log_sigma_sq)
 
     gen_cond_video = tf.stack(gen_cond_video, axis=0)
-    gen_prior_video = tf.stack(gen_prior_video, axis=0)
+    self.gen_prior_video = tf.stack(gen_prior_video, axis=0)
     fake_rewards = tf.stack(fake_rewards, axis=0)
 
-    if train_mode:
+    if train_mode and self.hparams.use_vae:
       return gen_cond_video, fake_rewards, latent_means, latent_stds
     else:
-      return gen_prior_video, fake_rewards, latent_means, latent_stds
+      return self.gen_prior_video, fake_rewards, latent_means, latent_stds

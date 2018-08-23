@@ -142,7 +142,8 @@ def decode_from_dataset(estimator,
                         hparams,
                         decode_hp,
                         decode_to_file=None,
-                        dataset_split=None):
+                        dataset_split=None,
+                        checkpoint_path=None):
   """Perform decoding from dataset."""
   tf.logging.info("Performing local inference from dataset for %s.",
                   str(problem_name))
@@ -186,7 +187,8 @@ def decode_from_dataset(estimator,
                          decode_hp,
                          decode_to_file,
                          output_dir,
-                         log_results=not decode_hp.decode_in_memory)
+                         log_results=not decode_hp.decode_in_memory,
+                         checkpoint_path=checkpoint_path)
 
     if decode_hp.decode_in_memory:
       output_dirs = [output_dir]
@@ -200,6 +202,7 @@ def decode_from_dataset(estimator,
       decode_hparams=decode_hp,
       predictions=predictions
   ))
+  return predictions
 
 
 def decode_once(estimator,
@@ -209,11 +212,13 @@ def decode_once(estimator,
                 decode_hp,
                 decode_to_file,
                 output_dir,
-                log_results=True):
+                log_results=True,
+                checkpoint_path=None):
   """Decodes once."""
 
   # Get the predictions as an iterable
-  predictions = estimator.predict(infer_input_fn)
+  predictions = estimator.predict(infer_input_fn,
+                                  checkpoint_path=checkpoint_path)
 
   if not log_results:
     return list(predictions)

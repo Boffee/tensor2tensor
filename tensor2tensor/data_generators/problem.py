@@ -734,6 +734,7 @@ class Problem(object):
                               mode,
                               hparams,
                               data_dir=None,
+                              force_repeat=False,
                               dataset_kwargs=None):
     """Return input_fn wrapped for Estimator."""
 
@@ -744,6 +745,7 @@ class Problem(object):
           data_dir=data_dir,
           params=params,
           config=config,
+          force_repeat=force_repeat,
           dataset_kwargs=dataset_kwargs)
 
     return estimator_input_fn
@@ -767,12 +769,10 @@ class Problem(object):
       self._next_partition_id = 0
       return 0, 1
     phift = config.tpu_config.per_host_input_for_training
-    # BEGIN GOOGLE-INTERNAL
-    # This is the mesh-tensorflow case.  Still requires patch of cl/204685944
+    # This is the mesh-tensorflow case.
     if (hasattr(tpu_config.InputPipelineConfig, "BROADCAST") and
         phift == tpu_config.InputPipelineConfig.BROADCAST):
       return 0, 1
-    # END GOOOGLE-INTERNAL
     if phift:
       num_partitions = max(config.tpu_config.num_shards // 8, 1)
     else:
@@ -790,6 +790,7 @@ class Problem(object):
                data_dir=None,
                params=None,
                config=None,
+               force_repeat=False,
                dataset_kwargs=None):
     """Builds input pipeline for problem.
 
@@ -800,6 +801,7 @@ class Problem(object):
       params: dict, may include "batch_size"
       config: RunConfig; should have the data_parallelism attribute if not using
         TPU
+      force_repeat: bool, whether to repeat the data even if not training
       dataset_kwargs: dict, if passed, will pass as kwargs to self.dataset
         method when called
 
@@ -844,9 +846,11 @@ class Problem(object):
     })
 
     dataset = self.dataset(**dataset_kwargs)
-    if is_training:
+    if force_repeat or is_training:
       # Repeat and skip a random number of records
       dataset = dataset.repeat()
+
+    if is_training:
       data_files = tf.contrib.slim.parallel_reader.get_data_files(
           self.filepattern(data_dir, mode))
       #  In continuous_train_and_eval when switching between train and
@@ -904,9 +908,10 @@ class Problem(object):
           # Here  batch_size really means examples per datashard.
           batching_scheme["batch_sizes"] = [hparams.batch_size]
           batching_scheme["boundaries"] = []
-        dataset = data_reader.bucket_by_sequence_length(
-            dataset, data_reader.example_length, batching_scheme["boundaries"],
-            batching_scheme["batch_sizes"])
+        dataset = dataset.apply(
+            tf.contrib.data.bucket_by_sequence_length(
+                data_reader.example_length, batching_scheme["boundaries"],
+                batching_scheme["batch_sizes"]))
 
         if not is_training:
           batch_multiple = shard_multiplier
@@ -946,6 +951,17 @@ class Problem(object):
                            data_reader.DummyQueueRunner())
 
     return dataset
+
+  @property
+  def export_assets(self):
+    """Assets to export with the model.
+
+    This property contains a dictionary of assets, such as vocabulary files,
+    that should be exported together with the model, or None if no assets
+    are needed.
+    """
+
+    return None
 
   def serving_input_fn(self, hparams):
     """Input fn for serving export, starting from serialized example."""

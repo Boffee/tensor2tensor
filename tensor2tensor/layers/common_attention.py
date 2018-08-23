@@ -33,6 +33,7 @@ from tensor2tensor.utils import expert_utils
 import tensorflow as tf
 
 from tensorflow.python.framework import function
+from tensorflow.python.ops import inplace_ops
 
 # Struct containing the sequences ids and order on a batch (are send to the
 # expert to allow them to compute the bias mask)
@@ -644,70 +645,67 @@ def add_timing_signal_nd(x, min_timescale=1.0, max_timescale=1.0e4):
   return x
 
 
-@expert_utils.add_name_scope()
 def add_positional_embedding(x, max_length, name, positions=None):
-  """Add positional embedding.
+  """Adds positional embedding.
 
   Args:
-    x: a Tensor with shape [batch, length, depth]
-    max_length: an integer.  static maximum size of any dimension.
-    name: a name for this layer.
-    positions: an optional tensor with shape [batch, length]
+    x: Tensor with shape [batch, length, depth].
+    max_length: int representing static maximum size of any dimension.
+    name: str representing name of the embedding tf.Variable.
+    positions: Tensor with shape [batch, length].
 
   Returns:
-    a Tensor the same shape as x.
+    Tensor of same shape as x.
   """
-  _, length, depth = common_layers.shape_list(x)
-  var = tf.cast(tf.get_variable(name, [max_length, depth]), x.dtype)
-  if positions is None:
-    sliced = tf.cond(
-        tf.less(length, max_length),
-        lambda: tf.slice(var, [0, 0], [length, -1]),
-        lambda: tf.pad(var, [[0, length - max_length], [0, 0]]))
-    return x + tf.expand_dims(sliced, 0)
-  else:
-    return x + tf.gather(var, tf.to_int32(positions))
+  with tf.name_scope("add_positional_embedding"):
+    _, length, depth = common_layers.shape_list(x)
+    var = tf.cast(tf.get_variable(name, [max_length, depth]), x.dtype)
+    if positions is None:
+      sliced = tf.cond(
+          tf.less(length, max_length),
+          lambda: tf.slice(var, [0, 0], [length, -1]),
+          lambda: tf.pad(var, [[0, max(0, length - max_length)], [0, 0]]))
+      return x + tf.expand_dims(sliced, 0)
+    else:
+      return x + tf.gather(var, tf.to_int32(positions))
 
 
-@expert_utils.add_name_scope()
 def add_positional_embedding_nd(x, max_length, name):
-  """Add n-dimensional positional embedding.
+  """Adds n-dimensional positional embedding.
 
-  Adds embeddings to represent the positional dimensions of the tensor.
-  The input tensor has n positional dimensions - i.e. 1 for text, 2 for images,
-  3 for video, etc.
+  The embeddings add to all positional dimensions of the tensor.
 
   Args:
-    x: a Tensor with shape [batch, p1 ... pn, depth]
-    max_length: an integer.  static maximum size of any dimension.
-    name: a name for this layer.
+    x: Tensor with shape [batch, p1 ... pn, depth]. It has n positional
+      dimensions, i.e., 1 for text, 2 for images, 3 for video, etc.
+    max_length: int representing static maximum size of any dimension.
+    name: str representing name of the embedding tf.Variable.
 
   Returns:
-    a Tensor the same shape as x.
+    Tensor of same shape as x.
   """
-  x_shape = common_layers.shape_list(x)
-  num_dims = len(x_shape) - 2
-  depth = x_shape[-1]
-  base_shape = [1] * (num_dims + 1) + [depth]
-  base_start = [0] * (num_dims + 2)
-  base_size = [-1] + [1] * num_dims + [depth]
-  for i in range(num_dims):
-    shape = base_shape[:]
-    start = base_start[:]
-    size = base_size[:]
-    shape[i + 1] = max_length
-    size[i + 1] = x_shape[i + 1]
-    var = (
-        tf.get_variable(
-            name + "_%d" % i,
-            shape,
-            initializer=tf.random_normal_initializer(0, depth**-0.5)) * (depth**
-                                                                         0.5))
-    x += tf.slice(var, start, size)
-  return x
+  with tf.name_scope("add_positional_embedding_nd"):
+    x_shape = common_layers.shape_list(x)
+    num_dims = len(x_shape) - 2
+    depth = x_shape[-1]
+    base_shape = [1] * (num_dims + 1) + [depth]
+    base_start = [0] * (num_dims + 2)
+    base_size = [-1] + [1] * num_dims + [depth]
+    for i in range(num_dims):
+      shape = base_shape[:]
+      start = base_start[:]
+      size = base_size[:]
+      shape[i + 1] = max_length
+      size[i + 1] = x_shape[i + 1]
+      var = tf.get_variable(
+          name + "_%d" % i,
+          shape,
+          initializer=tf.random_normal_initializer(0, depth**-0.5))
+      var = var * depth**0.5
+      x += tf.slice(var, start, size)
+    return x
 
 
-@expert_utils.add_name_scope()
 def make_edge_vectors(adjacency_matrix, num_edge_types, depth, name=None):
   """Gets edge vectors for the edge types in the adjacency matrix.
 
@@ -1920,16 +1918,14 @@ def masked_within_block_local_attention_1d(q, k, v, block_length=64, name=None):
   """
   with tf.variable_scope(
       name, default_name="within_local_attention_1d", values=[q, k, v]):
-    v_shape = v.get_shape()
-    batch, heads, length, _ = common_layers.shape_list(q)
+    batch, heads, length, depth_k = common_layers.shape_list(q)
+    depth_v = common_layers.shape_list(v)[-1]
     if isinstance(block_length, tf.Tensor):
       const = tf.contrib.util.constant_value(block_length)
       if const is not None:
         block_length = int(const)
 
     # Pad query, key, value to ensure multiple of block length.
-    depth_k = common_layers.shape_list(k)[3]
-    depth_v = common_layers.shape_list(v)[3]
     original_length = length
     padding_size = tf.mod(-length, block_length)
     length += padding_size
@@ -1945,9 +1941,8 @@ def masked_within_block_local_attention_1d(q, k, v, block_length=64, name=None):
     v = tf.reshape(v, [batch, heads, num_blocks, block_length, depth_v])
     # [batch, heads, num_blocks, block_length, block_length]
     attention = tf.matmul(q, k, transpose_b=True)
-    attention += tf.reshape(
-        attention_bias_lower_triangle(block_length),
-        [1, 1, 1, block_length, block_length])
+    attention += tf.reshape(attention_bias_lower_triangle(block_length),
+                            [1, 1, 1, block_length, block_length])
     attention = tf.nn.softmax(attention)
     # [batch, heads, num_blocks, block_length, depth_v]
     output = tf.matmul(attention, v)
@@ -1955,7 +1950,8 @@ def masked_within_block_local_attention_1d(q, k, v, block_length=64, name=None):
 
     # Remove the padding if introduced.
     output = tf.slice(output, [0, 0, 0, 0], [-1, -1, original_length, -1])
-    output.set_shape(v_shape)
+    output.set_shape([None if isinstance(dim, tf.Tensor) else dim for dim in
+                      (batch, heads, length, depth_v)])
     return output
 
 
@@ -2016,10 +2012,8 @@ def masked_local_attention_1d(q,
   """
   with tf.variable_scope(
       name, default_name="local_attention_1d", values=[q, k, v]):
-
-    batch = common_layers.shape_list(q)[0]
-    heads = common_layers.shape_list(q)[1]
-    length = common_layers.shape_list(q)[2]
+    batch, heads, length, depth_k = common_layers.shape_list(q)
+    depth_v = common_layers.shape_list(v)[-1]
     if isinstance(block_length, tf.Tensor):
       const = tf.contrib.util.constant_value(block_length)
       if const is not None:
@@ -2032,8 +2026,6 @@ def masked_local_attention_1d(q,
           tf.less(length, block_length * 2), length, block_length)
 
     # Pad query, key, value to ensure multiple of block length.
-    depth_k = common_layers.shape_list(k)[3]
-    depth_v = common_layers.shape_list(v)[3]
     original_length = length
     padding_size = tf.mod(-length, block_length)
     length += padding_size
@@ -2075,27 +2067,28 @@ def masked_local_attention_1d(q,
                         [batch, heads, num_blocks - 1, block_length, depth_k])
     local_length = common_layers.shape_list(local_k)[3]
 
-    # [batch, heads, num_blocks - 1, block_length, local_length]
-    attention = tf.matmul(tail_q, local_k, transpose_b=True)
-
     # make sure source_pos <= target_pos
-    good_part = common_layers.ones_matrix_band_part(block_length,
-                                                    local_length,
-                                                    -1, block_length)
-    mask = (1.0 - good_part) * -1e9
-    mask = common_layers.cast_like(mask, attention)
-    attention += tf.reshape(mask, [1, 1, 1, block_length, local_length])
-    attention = tf.nn.softmax(attention)
-    attention = common_layers.dropout_with_broadcast_dims(
-        attention, 1.0 - dropout_rate,
-        broadcast_dims=None)
+    good_part = common_layers.ones_matrix_band_part(
+        block_length,
+        local_length,
+        -1,
+        block_length,
+        out_shape=[1, 1, 1, block_length, local_length])
+    bias = (1.0 - good_part) * -1e9
     # TODO(noam): figure out how to show a summary for the remaining blocks.
     # The naive way currently causes errors due to empty tensors.
     # output: [batch, heads, num_blocks-1, block_length, depth_v]
-    output = tf.matmul(attention, local_v)
-    output = tf.reshape(
-        output, [batch, heads, (num_blocks - 1) * block_length, depth_v])
-    output = tf.concat([first_output, output], axis=2)
+    tail_output = dot_product_attention(
+        tail_q,
+        local_k,
+        local_v,
+        bias,
+        dropout_rate=dropout_rate,
+        make_image_summary=False,
+        name="tail_block")
+    tail_output = tf.reshape(
+        tail_output, [batch, heads, (num_blocks - 1) * block_length, depth_v])
+    output = tf.concat([first_output, tail_output], axis=2)
 
     # Remove the padding if introduced.
     output = tf.slice(output, [0, 0, 0, 0], [-1, -1, original_length, -1])
@@ -2313,11 +2306,8 @@ def local_attention_1d(q, k, v, block_length=128, filter_width=100, name=None):
   """
   with tf.variable_scope(
       name, default_name="local_self_attention_1d", values=[q, k, v]):
-    v_shape = v.get_shape()
-    depth_v = common_layers.shape_list(v)[3]
-    batch_size = common_layers.shape_list(q)[0]
-    num_heads = common_layers.shape_list(q)[1]
-    original_length = common_layers.shape_list(q)[2]
+    batch_size, num_heads, original_length, _ = common_layers.shape_list(q)
+    depth_v = common_layers.shape_list(v)[-1]
 
     # Pad query, key, value to ensure multiple of corresponding lengths.
     def pad_to_multiple(x, pad_length):
@@ -2333,10 +2323,7 @@ def local_attention_1d(q, k, v, block_length=128, filter_width=100, name=None):
 
     # Set up query blocks.
     new_q_shape = common_layers.shape_list(q)
-    q = tf.reshape(q, [
-        new_q_shape[0], new_q_shape[1], new_q_shape[2] // block_length,
-        block_length, new_q_shape[3]
-    ])
+    q = reshape_by_blocks(q, new_q_shape, block_length)
 
     # Set up key and value blocks.
     # Get gather indices.
@@ -2380,7 +2367,8 @@ def local_attention_1d(q, k, v, block_length=128, filter_width=100, name=None):
 
     # Remove the padding if introduced.
     output = tf.slice(output, [0, 0, 0, 0], [-1, -1, original_length, -1])
-    output.set_shape(v_shape)
+    output.set_shape([None if isinstance(dim, tf.Tensor) else dim for dim in
+                      (batch_size, num_heads, original_length, depth_v)])
     return output
 
 
@@ -3114,7 +3102,7 @@ def compute_attention_component(antecedent,
         antecedent, total_depth, use_bias=False, name=name)
   else:
     return common_layers.conv1d(
-        antecedent, total_depth, filter_width, padding, name=name)
+        antecedent, total_depth, filter_width, padding=padding, name=name)
 
 
 def compute_qkv(query_antecedent,
@@ -3316,11 +3304,11 @@ def multihead_attention(query_antecedent,
           # the tensor by adding the result of matmul(one_hot,
           # update_in_current_step)
           tmp_k = tf.transpose(cache["k"], perm=[2, 0, 1, 3])
-          tmp_k = common_layers.tf_inplace_ops().alias_inplace_update(
+          tmp_k = inplace_ops.alias_inplace_update(
               tmp_k, decode_loop_step, tf.squeeze(k, axis=2))
           k = cache["k"] = tf.transpose(tmp_k, perm=[1, 2, 0, 3])
           tmp_v = tf.transpose(cache["v"], perm=[2, 0, 1, 3])
-          tmp_v = common_layers.tf_inplace_ops().alias_inplace_update(
+          tmp_v = inplace_ops.alias_inplace_update(
               tmp_v, decode_loop_step, tf.squeeze(v, axis=2))
           v = cache["v"] = tf.transpose(tmp_v, perm=[1, 2, 0, 3])
 

@@ -31,15 +31,11 @@ import tensorflow as tf
 
 from tensorflow.python.framework import function
 from tensorflow.python.framework import ops
+from tensorflow.python.ops import control_flow_util
+from tensorflow.python.ops import inplace_ops
 
 # This is a global setting. When turned off, no @function.Defun is used.
 allow_defun = False
-
-
-# Lazy load inplace_ops
-def tf_inplace_ops():
-  from tensorflow.python.ops import inplace_ops  # pylint: disable=g-import-not-at-top
-  return inplace_ops
 
 
 @function.Defun(
@@ -65,14 +61,20 @@ def convert_gradient_to_tensor(x):
   return x
 
 
-def is_on_tpu():
-  # Support TF versions 1.5+
-  try:
-    from tensorflow.python.ops import control_flow_util  # pylint: disable=g-import-not-at-top
-    ctxt = tf.get_default_graph()._get_control_flow_context()  # pylint: disable=protected-access
-    return control_flow_util.GetContainingXLAContext(ctxt) is not None
-  except (ImportError, AttributeError):
-    return tf.contrib.framework.get_name_scope().startswith("TPUReplicate")
+def is_xla_compiled():
+  """Whether we are building graph that will be compiled by XLA.
+
+  This checks whether the code is executing within an XLA context.
+
+  If True, model authors should ensure the graph they build is compilable by
+  XLA. Specifically, they should ensure that all ops have XLA implementations
+  and that all shapes are statically known.
+
+  Returns:
+    bool, whether the current graph will be compiled for XLA.
+  """
+  ctxt = tf.get_default_graph()._get_control_flow_context()  # pylint: disable=protected-access
+  return control_flow_util.GetContainingXLAContext(ctxt) is not None
 
 
 def dropout_with_broadcast_dims(x, keep_prob, broadcast_dims=None, **kwargs):
@@ -127,16 +129,18 @@ def hard_tanh(x, saturation_limit=0.9):
   return tf.minimum(1.0, tf.maximum(x, -1.0)), saturation_cost
 
 
-def inverse_exp_decay(max_step, min_value=0.01):
+def inverse_exp_decay(max_step, min_value=0.01, step=None):
   """Inverse-decay exponentially from 0.01 to 1.0 reached at max_step."""
   inv_base = tf.exp(tf.log(min_value) / float(max_step))
-  step = tf.to_float(tf.train.get_global_step())
+  if step is None:
+    step = tf.to_float(tf.train.get_global_step())
   return inv_base**tf.maximum(float(max_step) - step, 0.0)
 
 
-def inverse_lin_decay(max_step, min_value=0.01):
+def inverse_lin_decay(max_step, min_value=0.01, step=None):
   """Inverse-decay linearly from 0.01 to 1.0 reached at max_step."""
-  step = tf.to_float(tf.train.get_global_step())
+  if step is None:
+    step = tf.to_float(tf.train.get_global_step())
   progress = tf.minimum(step / float(max_step), 1.0)
   return progress * (1.0 - min_value) + min_value
 
@@ -265,7 +269,7 @@ def flatten4d3d(x):
 # TODO(noam): remove this function after TPUs do gather faster.
 def gather(params, indices, dtype=tf.float32):
   """Version of tf.gather that works faster on tpu."""
-  if not is_on_tpu():
+  if not is_xla_compiled():
     return tf.gather(params, indices)
   vocab_size = params.get_shape().as_list()[0]
   indices_flat = tf.reshape(indices, [-1])
@@ -289,7 +293,7 @@ def cumsum(x, axis=0, exclusive=False):
   Returns:
     Tensor of the same shape as x.
   """
-  if not is_on_tpu():
+  if not is_xla_compiled():
     return tf.cumsum(x, axis=axis, exclusive=exclusive)
   x_shape = shape_list(x)
   rank = len(x_shape)
@@ -734,7 +738,8 @@ def apply_spectral_norm(x):
   # v = Wu / ||W u||
   with tf.variable_scope("u", reuse=tf.AUTO_REUSE):
     u = tf.get_variable(
-        "u", [num_filters, 1], initializer=tf.truncated_normal_initializer(),
+        "u", [num_filters, 1],
+        initializer=tf.truncated_normal_initializer(),
         trainable=False)
   v = tf.nn.l2_normalize(tf.matmul(weights_2d, u))
 
@@ -742,9 +747,8 @@ def apply_spectral_norm(x):
   u_new = tf.nn.l2_normalize(tf.matmul(tf.transpose(v), weights_2d))
 
   # s = v*W*u
-  spectral_norm = tf.squeeze(tf.matmul(
-      tf.transpose(v),
-      tf.matmul(weights_2d, tf.transpose(u_new))))
+  spectral_norm = tf.squeeze(
+      tf.matmul(tf.transpose(v), tf.matmul(weights_2d, tf.transpose(u_new))))
 
   # set u equal to u_new in the next iteration.
   assign_op = tf.assign(u, tf.transpose(u_new))
@@ -1644,7 +1648,7 @@ def conv_relu_conv(inputs,
         # the tensor by adding the result of matmul(one_hot,
         # update_in_current_step)
         tmp_f = tf.transpose(cache["f"], perm=[1, 0, 2])
-        tmp_f = tf_inplace_ops().alias_inplace_update(
+        tmp_f = inplace_ops.alias_inplace_update(
             tmp_f,
             decode_loop_step * tf.shape(inputs)[1],
             tf.transpose(inputs, perm=[1, 0, 2]))
@@ -1950,6 +1954,31 @@ def weights_multi_problem(labels, taskid=-1):
   past_taskid *= tf.to_float(tf.not_equal(labels, taskid))
   non_taskid = tf.to_float(labels)
   return tf.to_float(tf.not_equal(past_taskid * non_taskid, 0))
+
+
+def weights_multi_problem_all(labels, taskid=-1):
+  """Assign weight 1.0 to only examples from the given task."""
+  weights = tf.to_float(tf.not_equal(labels, 0))
+  if taskid < 0:
+    raise ValueError("Task ID must be non-negative.")
+
+  past_taskid = tf.cumsum(tf.to_float(tf.equal(labels, taskid)), axis=1)
+  # Additionally zero out the task id location
+  past_taskid *= tf.to_float(tf.not_equal(labels, taskid))
+  non_taskid = tf.to_float(labels)
+  example_mask = tf.to_float(tf.not_equal(past_taskid * non_taskid, 0))
+  example_mask = tf.reduce_sum(example_mask, axis=1)
+  example_mask = tf.to_float(
+      tf.greater(example_mask, tf.zeros_like(example_mask)))
+
+  return weights * tf.expand_dims(example_mask, axis=-1)
+
+
+def weights_multi_problem_input(labels, taskid=-1):
+  """Assign weight 1.0 to only the inputs for the given task."""
+  weights_all_tokens = weights_multi_problem_all(labels, taskid)
+  weights_target = weights_multi_problem(labels, taskid)
+  return weights_all_tokens - weights_target
 
 
 def weights_all(labels):
@@ -2506,7 +2535,7 @@ def sru(x,
   """
   if num_layers < 1:
     raise ValueError("Number of layers must be positive: %d" % num_layers)
-  if is_on_tpu():  # On TPU the XLA does a good job with while.
+  if is_xla_compiled():  # On TPU the XLA does a good job with while.
     return sru_with_scan(x, num_layers, activation, initial_state, name, reuse)
   try:
     from tensorflow.contrib.recurrent.python.ops import functional_rnn  # pylint: disable=g-import-not-at-top
@@ -3331,7 +3360,7 @@ def mix(x1,
       return get_res()
 
     # Prevent sampling after steps is passed to speed it up.
-    if is_on_tpu():
+    if is_xla_compiled():
       return get_res()
     else:
       return tf.cond(
@@ -3354,6 +3383,34 @@ def belu(x):
   y1 = tf.nn.elu(x1)
   y2 = -tf.nn.elu(-x2)
   return tf.reshape(tf.concat([y1, y2], axis=-1), x_shape)
+
+
+def nac(x, depth, name=None, reuse=None):
+  """NAC as in https://arxiv.org/abs/1808.00508."""
+  with tf.variable_scope(
+      name, default_name="nac", values=[x], reuse=reuse):
+    x_shape = shape_list(x)
+    w = tf.get_variable("w", [x_shape[-1], depth])
+    m = tf.get_variable("m", [x_shape[-1], depth])
+    w = tf.tanh(w) * tf.nn.sigmoid(m)
+    x_flat = tf.reshape(x, [-1, x_shape[-1]])
+    res_flat = tf.matmul(x_flat, w)
+    return tf.reshape(res_flat, x_shape[:-1] + [depth])
+
+
+def nalu(x, depth, epsilon=1e-30, name=None, reuse=None):
+  """NALU as in https://arxiv.org/abs/1808.00508."""
+  with tf.variable_scope(
+      name, default_name="nalu", values=[x], reuse=reuse):
+    x_shape = shape_list(x)
+    x_flat = tf.reshape(x, [-1, x_shape[-1]])
+    gw = tf.get_variable("w", [x_shape[-1], depth])
+    g = tf.nn.sigmoid(tf.matmul(x_flat, gw))
+    g = tf.reshape(g, x_shape[:-1] + [depth])
+    a = nac(x, depth, name="nac_lin")
+    log_x = tf.log(tf.abs(x) + epsilon)
+    m = nac(log_x, depth, name="nac_log")
+    return g * a + (1 - g) * tf.exp(m)
 
 
 def argmax_with_score(logits, axis=None):
@@ -3446,7 +3503,8 @@ def should_generate_summaries():
   Returns:
     a boolean
   """
-  if "while/" in tf.contrib.framework.get_name_scope():
+  name_scope = tf.contrib.framework.get_name_scope()
+  if name_scope and "while/" in name_scope:
     # Summaries don't work well within tf.while_loop()
     return False
   if tf.get_variable_scope().reuse:
@@ -3591,7 +3649,7 @@ def sliced_gan_loss(input1,
         proj = tf.tanh(x)
       proj = tf.transpose(proj, [1, 0])  # [num_vecs, batch] after this.
 
-      if is_on_tpu():
+      if is_xla_compiled():
         proj_dtype = proj.dtype
         proj = tf.cast(proj, tf.bfloat16)
 
@@ -3620,7 +3678,7 @@ def upscale(inputs, f, method=tf.image.ResizeMethod.NEAREST_NEIGHBOR):
 
 
 def tpu_safe_image_summary(image):
-  if is_on_tpu():
+  if is_xla_compiled():
     # We only support float32 images at the moment due to casting complications.
     if image.dtype != tf.float32:
       image = tf.to_float(image)
@@ -3693,6 +3751,103 @@ def cyclegan_upsample(net, num_outputs, stride, method="conv2d_transpose"):
     return net
 
 
+def weight_targeting(w, k):
+  """Weight-level magnitude pruning."""
+  k = tf.to_int32(k)
+  w_shape = shape_list(w)
+  size = tf.to_int32(tf.reduce_prod(w_shape[:-1]))
+  w = tf.reshape(w, [size, w_shape[-1]])
+
+  transpose_w = tf.transpose(w)
+  thres = tf.contrib.framework.sort(tf.abs(transpose_w), axis=1)[:, k]
+  mask = tf.to_float(thres[None, :] >= tf.abs(w))
+
+  return tf.reshape(mask, w_shape)
+
+
+def unit_targeting(w, k):
+  """Unit-level magnitude pruning."""
+  k = tf.to_int32(k)
+  w_shape = shape_list(w)
+  size = tf.to_int32(tf.reduce_prod(w_shape[:-1]))
+  w = tf.reshape(w, [size, w_shape[-1]])
+
+  norm = tf.norm(w, axis=0)
+  thres = tf.contrib.framework.sort(norm, axis=0)[k]
+  mask = tf.to_float(thres >= norm)[None, :]
+  mask = tf.tile(mask, [size, 1])
+
+  return tf.reshape(mask, w_shape)
+
+
+def td_conv(inputs,
+            filters,
+            kernel_size,
+            targeting_count,
+            targeting_fn,
+            keep_prob,
+            is_training,
+            do_prune=True,
+            strides=(1, 1),
+            padding="valid",
+            data_format="channels_last",
+            dilation_rate=(1, 1),
+            activation=None,
+            use_bias=True,
+            kernel_initializer=None,
+            bias_initializer=tf.zeros_initializer(),
+            name=None,
+            reuse=None):
+  """Apply targeted dropout to the weights of a convolution."""
+  with tf.variable_scope(name, default_name="td_conv", reuse=reuse):
+    nhwc = data_format == "channels_last"
+    in_dim = shape_list(inputs)[-1] if nhwc else shape_list(inputs)[1]
+
+    kernel_shape = [kernel_size, kernel_size, in_dim, filters]
+    w = tf.get_variable(
+        "DW", shape=kernel_shape, initializer=kernel_initializer)
+    if use_bias:
+      b = tf.get_variable("b", shape=[filters], initializer=bias_initializer)
+
+    if keep_prob < 1.0:
+      w = targeted_dropout(
+          w,
+          targeting_count,
+          keep_prob,
+          targeting_fn,
+          is_training,
+          do_prune=do_prune)
+
+    if isinstance(strides, int):
+      strides = [strides, strides]
+    if isinstance(dilation_rate, int):
+      dilation_rate = [dilation_rate, dilation_rate]
+
+    if nhwc:
+      strides = [1, strides[0], strides[1], 1]
+      dilation_rate = [1, dilation_rate[0], dilation_rate[1], 1]
+    else:
+      strides = [1, 1, strides[0], strides[1]]
+      dilation_rate = [1, 1, dilation_rate[0], dilation_rate[1]]
+
+    y = tf.nn.conv2d(
+        inputs,
+        w,
+        strides,
+        padding,
+        data_format="NHWC" if nhwc else "NCHW",
+        dilations=dilation_rate,
+        name=None)
+
+    if use_bias:
+      y += b
+
+    if activation:
+      y = activation(y)
+
+    return y
+
+
 def targeted_dropout(inputs,
                      k,
                      keep_prob,
@@ -3701,8 +3856,8 @@ def targeted_dropout(inputs,
                      do_prune=False):
   """Applies targeted dropout.
 
-  Applies dropout at a rate of `1 - keep_prob` to only those elements of `x`
-  marked by `targeting_fn`. See below and paper for more detail:
+  Applies dropout at a rate of `1 - keep_prob` to only those elements of
+  `inputs` marked by `targeting_fn`. See below and paper for more detail:
 
   "Targeted Dropout for Posthoc Pruning" Aidan N. Gomez, Ivan Zhang,
     Kevin Swersky, Yarin Gal, and Geoffrey E. Hinton.
@@ -3719,11 +3874,12 @@ def targeted_dropout(inputs,
     is_training: bool, indicates whether currently training.
     do_prune: bool, indicates whether to prune the `k * (1 - keep_prob)`
       elements of `inputs` expected to be dropped each forwards pass.
+
   Returns:
     Tensor, same shape and dtype as `inputs`.
   """
   if not is_training and do_prune:
-    k = tf.round(k * (1 - keep_prob))
+    k = tf.round(tf.to_float(k) * tf.to_float(1. - keep_prob))
 
   mask = targeting_fn(inputs, k)
   mask = tf.cast(mask, inputs.dtype)
@@ -3751,3 +3907,162 @@ def kl_divergence(mu, log_sigma):
   return kl / tf.to_float(batch_size)
 
 
+def sparse_equals_constant(constant, tensor):
+  return tf.SparseTensor(
+      indices=tensor.indices,
+      dense_shape=tensor.dense_shape,
+      values=tf.equal(tensor.values, constant))
+
+
+def sparse_expand_dims(tensor, current_num_dims, axis=0):
+  if axis == -1:
+    axis = current_num_dims
+
+  new_col = tf.zeros([tf.shape(tensor.indices)[0]], dtype=tf.int64)
+  cols = tf.unstack(tensor.indices, axis=1, num=current_num_dims)
+  shape = tf.unstack(tensor.dense_shape, num=current_num_dims)
+  new_indices = tf.stack(cols[:axis] + [new_col] + cols[axis:], axis=1)
+  return tf.SparseTensor(
+      indices=new_indices,
+      values=tensor.values,
+      dense_shape=tf.stack(shape[:axis] + [1] + shape[axis:]))
+
+
+def sparse_add_constant(constant, tensor):
+  return tf.SparseTensor(
+      indices=tensor.indices,
+      values=constant + tensor.values,
+      dense_shape=tensor.dense_shape)
+
+
+def sparse_eye(size):
+  indices = tf.cast(tf.stack([tf.range(size), tf.range(size)]), tf.int64)
+  values = tf.ones(size)
+  dense_shape = [tf.cast(size, tf.int64), tf.cast(size, tf.int64)]
+
+  return tf.SparseTensor(
+      indices=indices, values=values, dense_shape=dense_shape)
+
+
+# modification from https://github.com/tensorflow/tensorflow/pull/21276
+# without special initialization for g
+class WeightNorm(tf.keras.layers.Wrapper):
+  """ This wrapper reparameterizes a layer by decoupling the weight's
+  magnitude and direction. This speeds up convergence by improving the
+  conditioning of the optimization problem.
+
+  Weight Normalization: A Simple Reparameterization to Accelerate
+  Training of Deep Neural Networks: https://arxiv.org/abs/1602.07868
+  Tim Salimans, Diederik P. Kingma (2016)
+
+  WeightNorm wrapper works for keras and tf layers.
+
+  ```python
+    net = WeightNorm(tf.keras.layers.Conv2D(2, 2, activation='relu'),
+           input_shape=(32, 32, 3), data_init=True)(x)
+    net = WeightNorm(tf.keras.layers.Conv2D(16, 5, activation='relu'),
+                     data_init=True)
+    net = WeightNorm(tf.keras.layers.Dense(120, activation='relu'),
+                     data_init=True)(net)
+    net = WeightNorm(tf.keras.layers.Dense(n_classes),
+                     data_init=True)(net)
+  ```
+
+  Arguments:
+    layer: a layer instance.
+    data_init: If `True` use data dependent variable initialization
+
+  Raises:
+    ValueError: If not initialized with a `Layer` instance.
+    ValueError: If `Layer` does not contain a `kernel` of weights
+    NotImplementedError: If `data_init` is True and running graph execution
+  """
+
+  def __init__(self, layer, data_init=False, **kwargs):
+    if not isinstance(layer, tf.keras.layers.Layer):
+      raise ValueError(
+          "Please initialize `WeightNorm` layer with a "
+          "`Layer` instance. You passed: {input}".format(input=layer))
+
+    super(WeightNorm, self).__init__(layer, **kwargs)
+    self._track_checkpointable(layer, name="layer")
+
+  def _compute_weights(self):
+    """Generate weights with normalization."""
+    with tf.variable_scope("compute_weights"):
+      self.layer.kernel = tf.nn.l2_normalize(
+          self.layer.v, axis=self.norm_axes) * self.layer.g
+
+  def _init_norm(self, weights):
+    """Set the norm of the weight vector."""
+    with tf.variable_scope("init_norm"):
+      flat = tf.reshape(weights, [-1, self.layer_depth])
+      return tf.reshape(tf.norm(flat, axis=0), (self.layer_depth,))
+
+  def _data_dep_init(self, inputs):
+    """Data dependent initialization for eager execution."""
+
+    with tf.variable_scope("data_dep_init"):
+      # Generate data dependent init values
+      activation = self.layer.activation
+      self.layer.activation = None
+      x_init = self.layer.call(inputs)
+      m_init, v_init = tf.moments(x_init, self.norm_axes)
+      scale_init = 1. / tf.sqrt(v_init + 1e-10)
+
+    # Assign data dependent init values
+    self.layer.g = self.layer.g * scale_init
+    self.layer.bias = (-m_init * scale_init)
+    self.layer.activation = activation
+    self.initialized = True
+
+  def build(self, input_shape=None):
+    """Build `Layer`."""
+    input_shape = tf.TensorShape(input_shape).as_list()
+    self.input_spec = tf.layers.InputSpec(shape=input_shape)
+
+    if not self.layer.built:
+      self.layer.build(input_shape)
+      self.layer.built = False
+
+      if not hasattr(self.layer, "kernel"):
+        raise ValueError(
+            "`WeightNorm` must wrap a layer that"
+            " contains a `kernel` for weights"
+        )
+
+      # The kernel's filter or unit dimension is -1
+      self.layer_depth = int(self.layer.kernel.shape[-1])
+      self.norm_axes = list(range(self.layer.kernel.shape.ndims - 1))
+
+      self.layer.v = self.layer.kernel
+      self.layer.g = self.layer.add_variable(
+          name="g",
+          shape=(self.layer_depth,),
+          initializer=tf.ones_initializer,
+          dtype=self.layer.kernel.dtype,
+          trainable=True)
+
+      # with ops.control_dependencies([self.layer.g.assign(
+      #     self._init_norm(self.layer.v))]):
+      #   self._compute_weights()
+      self._compute_weights()
+
+      self.layer.built = True
+
+    super(WeightNorm, self).build()
+    self.built = True
+
+  def call(self, inputs):
+    """Call `Layer`."""
+    # if context.executing_eagerly():
+    #   if not self.initialized:
+    #     self._data_dep_init(inputs)
+    self._compute_weights()  # Recompute weights for each forward pass
+
+    output = self.layer.call(inputs)
+    return output
+
+  def compute_output_shape(self, input_shape):
+    return tf.TensorShape(
+        self.layer.compute_output_shape(input_shape).as_list())
