@@ -313,6 +313,10 @@ class Problem(object):
     """
     return False
 
+  @property
+  def multi_target(self):
+    return False
+    
   def dataset_filename(self):
     return self.name
 
