@@ -27,7 +27,7 @@ import tensorflow as tf
 
 class ModalityTest(tf.test.TestCase):
 
-  @tf.contrib.eager.run_test_in_graph_and_eager_modes
+  @tf.contrib.eager.run_test_in_graph_and_eager_modes()
   def testSymbolModalityInputs(self):
     batch_size = 10
     num_datashards = 5
@@ -49,7 +49,7 @@ class ModalityTest(tf.test.TestCase):
     res = self.evaluate(output)
     self.assertEqual(res.shape, (batch_size, length, 1, hidden_size))
 
-  @tf.contrib.eager.run_test_in_graph_and_eager_modes
+  @tf.contrib.eager.run_test_in_graph_and_eager_modes()
   def testSymbolModalityTargets(self):
     batch_size = 10
     num_datashards = 5
@@ -97,7 +97,7 @@ class ModalityTest(tf.test.TestCase):
     m = modalities.SymbolModality(model_hparams, vocab_size)
     data_parallelism = expert_utils.Parallelism(
         ["/device:CPU:0"] * num_datashards)
-    with self.session() as session:
+    with self.test_session() as session:
       sharded_body_output = tf.split(tf.to_float(body_output), num_datashards)
       sharded_targets = tf.split(targets, num_datashards)
       sharded_logits = m.top_sharded(sharded_body_output, sharded_targets,

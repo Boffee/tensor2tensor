@@ -28,9 +28,11 @@ from functools import partial
 
 from tensor2tensor.layers import common_layers
 from tensor2tensor.layers import common_video
-from tensor2tensor.models.research import next_frame_basic_stochastic
-from tensor2tensor.models.research import next_frame_sv2p_params  # pylint: disable=unused-import
+
+from tensor2tensor.models.video import basic_stochastic
+from tensor2tensor.models.video import sv2p_params  # pylint: disable=unused-import
 from tensor2tensor.utils import registry
+
 import tensorflow as tf
 
 tfl = tf.layers
@@ -38,7 +40,7 @@ tfcl = tf.contrib.layers
 
 
 @registry.register_model
-class NextFrameSv2p(next_frame_basic_stochastic.NextFrameBasicStochastic):
+class NextFrameSv2p(basic_stochastic.NextFrameBasicStochastic):
   """Stochastic Variational Video Prediction."""
 
   def tinyify(self, array):
@@ -225,12 +227,10 @@ class NextFrameSv2p(next_frame_basic_stochastic.NextFrameBasicStochastic):
 
     with tf.variable_scope("reward_pred", reuse=tf.AUTO_REUSE):
       x = tf.concat(input_images, axis=3)
-      x = tfcl.batch_norm(x, updates_collections=None,
-                          is_training=self.is_training, scope="reward_bn0")
+      x = tfcl.layer_norm(x)
       x = tfl.conv2d(x, conv_size[1], [3, 3], strides=(2, 2),
                      activation=tf.nn.relu, name="reward_conv1")
-      x = tfcl.batch_norm(x, updates_collections=None,
-                          is_training=self.is_training, scope="reward_bn1")
+      x = tfcl.layer_norm(x)
 
       # Inject additional inputs
       if action is not None:
@@ -246,8 +246,7 @@ class NextFrameSv2p(next_frame_basic_stochastic.NextFrameBasicStochastic):
 
       x = tfl.conv2d(x, conv_size[2], [3, 3], strides=(2, 2),
                      activation=tf.nn.relu, name="reward_conv2")
-      x = tfcl.batch_norm(x, updates_collections=None,
-                          is_training=self.is_training, scope="reward_bn2")
+      x = tfcl.layer_norm(x)
       x = tfl.conv2d(x, conv_size[3], [3, 3], strides=(2, 2),
                      activation=tf.nn.relu, name="reward_conv3")
       return x
@@ -479,6 +478,33 @@ class NextFrameSv2p(next_frame_basic_stochastic.NextFrameBasicStochastic):
       tf.summary.scalar("kl_raw", tf.reduce_mean(kl_loss))
     return beta * kl_loss
 
+  def infer(self, features, *args, **kwargs):
+    """Produce predictions from the model by running it."""
+    del args, kwargs
+    if "targets" not in features:
+      if "infer_targets" in features:
+        targets_shape = common_layers.shape_list(features["infer_targets"])
+      elif "inputs" in features:
+        targets_shape = common_layers.shape_list(features["inputs"])
+        targets_shape[1] = self.hparams.video_num_target_frames
+      else:
+        raise ValueError("no inputs are given.")
+      features["targets"] = tf.zeros(targets_shape, dtype=tf.float32)
+
+    output, _ = self(features)  # pylint: disable=not-callable
+
+    if not isinstance(output, dict):
+      output = {"targets": output}
+
+    output["targets"] = tf.squeeze(output["targets"], axis=-1)
+    if self.hparams.reward_prediction:
+      output["target_reward"] = tf.argmax(output["target_reward"], axis=-1)
+
+    # only required for decoding.
+    output["outputs"] = output["targets"]
+    output["scores"] = output["targets"]
+    return output
+
   def body(self, features):
     hparams = self.hparams
     batch_size = common_layers.shape_list(features["inputs"])[0]
@@ -528,14 +554,15 @@ class NextFrameSv2p(next_frame_basic_stochastic.NextFrameBasicStochastic):
     # This is NOT the same as original paper/implementation.
     predictions = gen_images[hparams.video_num_input_frames-1:]
     reward_pred = gen_rewards[hparams.video_num_input_frames-1:]
-    reward_pred = tf.squeeze(reward_pred, axis=2)  # Remove undeeded dimension.
+    if self.is_training:
+      reward_pred = tf.squeeze(reward_pred, axis=2)  # Remove extra dimension.
 
     # Swap back time and batch axes.
     predictions = common_video.swap_time_and_batch_axes(predictions)
     reward_pred = common_video.swap_time_and_batch_axes(reward_pred)
 
     return_targets = predictions
-    if "target_reward" in features:
+    if hparams.reward_prediction:
       return_targets = {"targets": predictions, "target_reward": reward_pred}
 
     if hparams.internal_loss:

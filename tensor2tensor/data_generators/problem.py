@@ -735,6 +735,7 @@ class Problem(object):
                               hparams,
                               data_dir=None,
                               force_repeat=False,
+                              prevent_repeat=False,
                               dataset_kwargs=None):
     """Return input_fn wrapped for Estimator."""
 
@@ -746,6 +747,7 @@ class Problem(object):
           params=params,
           config=config,
           force_repeat=force_repeat,
+          prevent_repeat=prevent_repeat,
           dataset_kwargs=dataset_kwargs)
 
     return estimator_input_fn
@@ -791,6 +793,7 @@ class Problem(object):
                params=None,
                config=None,
                force_repeat=False,
+               prevent_repeat=False,
                dataset_kwargs=None):
     """Builds input pipeline for problem.
 
@@ -802,6 +805,8 @@ class Problem(object):
       config: RunConfig; should have the data_parallelism attribute if not using
         TPU
       force_repeat: bool, whether to repeat the data even if not training
+      prevent_repeat: bool, whether to not repeat when in training mode.
+        Overrides force_repeat.
       dataset_kwargs: dict, if passed, will pass as kwargs to self.dataset
         method when called
 
@@ -846,7 +851,7 @@ class Problem(object):
     })
 
     dataset = self.dataset(**dataset_kwargs)
-    if force_repeat or is_training:
+    if (force_repeat or is_training) and not prevent_repeat:
       # Repeat and skip a random number of records
       dataset = dataset.repeat()
 

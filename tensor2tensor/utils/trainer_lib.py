@@ -394,15 +394,35 @@ class T2TExperiment(object):
         task_index=config.task_id)
     server.join()
 
-  def decode(self):
-    """Decodes from dataset."""
-    decoding.decode_from_dataset(self._estimator, self._hparams.problem.name,
-                                 self._hparams, self._decode_hparams)
+  def decode(self, dataset_split=None, decode_from_file=False):
+    """Decodes from dataset or file."""
+    if decode_from_file:
+      decoding.decode_from_file(self._estimator,
+                                self._decode_hparams.decode_from_file,
+                                self._hparams,
+                                self._decode_hparams,
+                                self._decode_hparams.decode_to_file)
+    else:
+      decoding.decode_from_dataset(self._estimator,
+                                   self._hparams.problem.name,
+                                   self._hparams,
+                                   self._decode_hparams,
+                                   dataset_split=dataset_split)
 
   def continuous_decode(self):
     """Decode from dataset on new checkpoint."""
     for _ in next_checkpoint(self._hparams.model_dir):
       self.decode()
+
+  def continuous_decode_on_train_data(self):
+    """Decode from dataset on new checkpoint."""
+    for _ in next_checkpoint(self._hparams.model_dir):
+      self.decode(dataset_split=tf.estimator.ModeKeys.TRAIN)
+
+  def continuous_decode_from_file(self):
+    """Decode from file on new checkpoint."""
+    for _ in next_checkpoint(self._hparams.model_dir):
+      self.decode(decode_from_file=True)
 
 
 def create_experiment(
@@ -430,7 +450,10 @@ def create_experiment(
     use_xla=False,
     additional_train_hooks=None,
     additional_eval_hooks=None,
-    warm_start_from=None):
+    warm_start_from=None,
+    decode_from_file=None,
+    decode_to_file=None,
+    decode_reference=None):
   """Create Experiment."""
   # HParams
   hparams.add_hparam("model_dir", run_config.model_dir)
@@ -439,6 +462,10 @@ def create_experiment(
   hparams.add_hparam("eval_steps", eval_steps)
   hparams.add_hparam("schedule", schedule)
   hparams.add_hparam("warm_start_from", warm_start_from)
+  if decode_hparams is not None:
+    decode_hparams.add_hparam("decode_from_file", decode_from_file)
+    decode_hparams.add_hparam("decode_to_file", decode_to_file)
+    decode_hparams.add_hparam("decode_reference", decode_reference)
   add_problem_hparams(hparams, problem_name)
 
   # Estimator
@@ -556,11 +583,6 @@ def create_experiment_fn(*args, **kwargs):
     return create_experiment(run_config, hparams, *args, **kwargs)
 
   return experiment_fn
-
-
-def create_export_strategy(problem, hparams):
-  return tf.contrib.learn.make_export_strategy(
-      lambda: problem.serving_input_fn(hparams), as_text=True)
 
 
 def add_problem_hparams(hparams, problem_name):

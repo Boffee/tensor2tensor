@@ -33,10 +33,11 @@ def _rollout_metadata(batch_env):
   batch_size = [batch_env_shape[0]]
   shapes_types_names = [
       # TODO(piotrmilos): possibly retrieve the observation type for batch_env
-      (batch_size + batch_env_shape[1:], tf.float32, "observation"),
+      (batch_size + batch_env_shape[1:], batch_env.observ_dtype, "observation"),
       (batch_size, tf.float32, "reward"),
       (batch_size, tf.bool, "done"),
-      (batch_size + batch_env.action_shape, batch_env.action_dtype, "action"),
+      (batch_size + list(batch_env.action_shape), batch_env.action_dtype,
+       "action"),
       (batch_size, tf.float32, "pdf"),
       (batch_size, tf.float32, "value_function"),
   ]
@@ -57,8 +58,7 @@ class _MemoryWrapper(WrapperBase):
     self.speculum = tf.FIFOQueue(infinity, shapes=shapes, dtypes=dtypes)
     observs_shape = batch_env.observ.shape
     # TODO(piotrmilos): possibly retrieve the observation type for batch_env
-    observ_dtype = tf.float32
-    self._observ = tf.Variable(tf.zeros(observs_shape, observ_dtype),
+    self._observ = tf.Variable(tf.zeros(observs_shape, self.observ_dtype),
                                trainable=False)
 
   def simulate(self, action):
@@ -145,11 +145,13 @@ def define_collect(hparams, scope, eval_phase,
     force_beginning_resets = False
   force_beginning_resets = tf.convert_to_tensor(force_beginning_resets)
 
-  def group():
+  def reset_ops_group():
     return tf.group(batch_env.reset(tf.range(len(batch_env))),
                     tf.assign(cumulative_rewards, zeros_tensor))
+
   reset_op = tf.cond(
-      tf.logical_or(should_reset_var, force_beginning_resets), group, tf.no_op)
+      tf.logical_or(should_reset_var.read_value(), force_beginning_resets),
+      reset_ops_group, tf.no_op)
 
   with tf.control_dependencies([reset_op]):
     reset_once_op = tf.assign(should_reset_var, False)
@@ -215,7 +217,7 @@ def define_collect(hparams, scope, eval_phase,
       with tf.control_dependencies([cumulate_rewards_op]):
         # TODO(piotrmilos): possibly we need cumulative_rewards.read_value()
         scores_sum_delta = tf.reduce_sum(
-            tf.gather(cumulative_rewards, agent_indices_to_reset))
+            tf.gather(cumulative_rewards.read_value(), agent_indices_to_reset))
         scores_num_delta = tf.count_nonzero(done, dtype=tf.int32)
       with tf.control_dependencies(save_ops + [scores_sum_delta,
                                                scores_num_delta]):
@@ -258,7 +260,7 @@ def define_collect(hparams, scope, eval_phase,
                        lambda: 0.)
   printing = tf.Print(0, [mean_score, scores_sum, scores_num], "mean_score: ")
   with tf.control_dependencies([index, printing]):
-    memory = [tf.identity(mem) for mem in memory]
+    memory = [mem.read_value() for mem in memory]
     mean_score_summary = tf.cond(
         tf.greater(scores_num, 0),
         lambda: tf.summary.scalar("mean_score_this_iter", mean_score),

@@ -29,10 +29,6 @@ from tensor2tensor.utils import t2t_model
 import tensorflow as tf
 
 
-def lrelu(input_, leak=0.2, name="lrelu"):
-  return tf.maximum(input_, leak * input_, name=name)
-
-
 def reverse_gradient(x, lr=1.0):
   return -lr * x + tf.stop_gradient((1.0 + lr) * x)
 
@@ -88,45 +84,6 @@ class AutoencoderBasic(t2t_model.T2TModel):
         noise = 2.0 * tf.random_uniform(common_layers.shape_list(x)) - 1.0
         return tf.tanh(x) + noise * hparams.bottleneck_noise, 0.0
       return tf.tanh(x), 0.0
-
-  def discriminator(self, x, is_training):
-    """Discriminator architecture based on InfoGAN.
-
-    Args:
-      x: input images, shape [bs, h, w, channels]
-      is_training: boolean, are we in train or eval model.
-
-    Returns:
-      out_logit: the output logits (before sigmoid).
-    """
-    hparams = self.hparams
-    with tf.variable_scope(
-        "discriminator", initializer=tf.random_normal_initializer(stddev=0.02)):
-      batch_size, height, width = common_layers.shape_list(x)[:3]
-      # Mapping x from [bs, h, w, c] to [bs, 1]
-      net = tf.layers.conv2d(
-          x, 64, (4, 4), strides=(2, 2), padding="SAME", name="d_conv1")
-      # [bs, h/2, w/2, 64]
-      net = lrelu(net)
-      net = tf.layers.conv2d(
-          net, 128, (4, 4), strides=(2, 2), padding="SAME", name="d_conv2")
-      # [bs, h/4, w/4, 128]
-      if hparams.discriminator_batchnorm:
-        net = tf.layers.batch_normalization(
-            net, training=is_training, momentum=0.999, name="d_bn2")
-      net = lrelu(net)
-      size = height * width
-      x_shape = x.get_shape().as_list()
-      if x_shape[1] is None or x_shape[2] is None:
-        net = tf.reduce_mean(net, axis=[1, 2])  # [bs, 128]
-      else:
-        net = tf.reshape(net, [batch_size, size * 8])  # [bs, h * w * 8]
-      net = tf.layers.dense(net, 1024, name="d_fc3")  # [bs, 1024]
-      if hparams.discriminator_batchnorm:
-        net = tf.layers.batch_normalization(
-            net, training=is_training, momentum=0.999, name="d_bn3")
-      net = lrelu(net)
-      return net
 
   def unbottleneck(self, x, res_size, reuse=None):
     with tf.variable_scope("unbottleneck", reuse=reuse):
@@ -194,8 +151,7 @@ class AutoencoderBasic(t2t_model.T2TModel):
       reconstr_gan += gumbel_samples
       reconstr_sample = latent_layers.multinomial_sample(
           reconstr_gan, temperature=hparams.gumbel_temperature)
-      reconstr_gan = tf.nn.softmax(
-          reconstr_gan / hparams.gumbel_temperature)
+      reconstr_gan = tf.nn.softmax(reconstr_gan / hparams.gumbel_temperature)
     else:
       reconstr_sample = tf.argmax(reconstr_gan, axis=-1)
       reconstr_gan = tf.nn.softmax(reconstr_gan / 0.1)  # Sharpen a bit.
@@ -212,6 +168,10 @@ class AutoencoderBasic(t2t_model.T2TModel):
     self.is1d = hparams.sample_width == 1
     if hparams.mode != tf.estimator.ModeKeys.PREDICT:
       labels = features["targets_raw"]
+      labels_shape = common_layers.shape_list(labels)
+      # handle videos
+      if len(labels.shape) == 5:
+        labels = common_layers.time_to_channels(labels)
       shape = common_layers.shape_list(labels)
       x = tf.one_hot(labels, vocab_size)
       x = self.embed(x)
@@ -251,7 +211,8 @@ class AutoencoderBasic(t2t_model.T2TModel):
         # Add a purely sampled batch on which we'll compute the GAN loss.
         g = self.unbottleneck(
             self.sample(shape=b_shape),
-            common_layers.shape_list(x)[-1], reuse=True)
+            common_layers.shape_list(x)[-1],
+            reuse=True)
         x = tf.concat([g, x], axis=0)
         encoder_layers = [tf.concat([l, l], axis=0) for l in encoder_layers]
     else:
@@ -259,6 +220,7 @@ class AutoencoderBasic(t2t_model.T2TModel):
         b = self.sample()
       else:
         b = self._cur_bottleneck_tensor
+      self._cur_bottleneck_tensor = b
       res_size = self.hparams.hidden_size * 2**self.hparams.num_hidden_layers
       res_size = min(res_size, hparams.max_hidden_size)
       x = self.unbottleneck(b, res_size)
@@ -281,8 +243,7 @@ class AutoencoderBasic(t2t_model.T2TModel):
 
     if hparams.mode == tf.estimator.ModeKeys.PREDICT:
       if hparams.use_vq_loss:
-        (reconstr, _, _, _, _) = discretization.vq_loss(
-            res, labels, vocab_size)
+        (reconstr, _, _, _, _) = discretization.vq_loss(res, labels, vocab_size)
       else:
         reconstr = tf.layers.dense(res, vocab_size, name="autoencoder_final")
       return reconstr, {"bottleneck_loss": 0.0}
@@ -291,8 +252,10 @@ class AutoencoderBasic(t2t_model.T2TModel):
       res_gan, res = tf.split(res, 2, axis=0)
 
     # Losses.
-    losses = {"bottleneck_extra": b_loss,
-              "bottleneck_l2": hparams.bottleneck_l2_factor * xb_loss}
+    losses = {
+        "bottleneck_extra": b_loss,
+        "bottleneck_l2": hparams.bottleneck_l2_factor * xb_loss
+    }
 
     if hparams.use_vq_loss:
       vq_temperature = hparams.vq_temperature / common_layers.inverse_exp_decay(
@@ -309,7 +272,8 @@ class AutoencoderBasic(t2t_model.T2TModel):
     else:
       reconstr = tf.layers.dense(res, vocab_size, name="autoencoder_final")
       targets_loss = tf.losses.sparse_softmax_cross_entropy(
-          logits=reconstr, labels=labels)
+          logits=tf.reshape(reconstr, labels_shape + [vocab_size]),
+          labels=tf.reshape(labels, labels_shape))
       losses["training"] = targets_loss
 
     # GAN losses.
@@ -320,13 +284,18 @@ class AutoencoderBasic(t2t_model.T2TModel):
         with tf.variable_scope("vq_loss", reuse=True):
           update_means = tf.less(tf.random_uniform([]), update_means_factor)
           reconstr_gan, gan_codes, _, code_loss_gan, _ = discretization.vq_loss(
-              res_gan, labels, vocab_size, do_update=update_means,
+              res_gan,
+              labels,
+              vocab_size,
+              do_update=update_means,
               temperature=vq_temperature)
+          reconstr_gan_nonoise = reconstr_gan
           code_loss_gan *= hparams.code_loss_factor * update_means_factor
           losses["code_loss_gan"] = code_loss_gan
       else:
         reconstr_gan = tf.layers.dense(
             res_gan, vocab_size, name="autoencoder_final", reuse=True)
+        reconstr_gan_nonoise = reconstr_gan
         reconstr_gan = self.gumbel_sample(reconstr_gan)
         # Embed to codes.
         gan_codes = self.embed(reconstr_gan)
@@ -334,10 +303,31 @@ class AutoencoderBasic(t2t_model.T2TModel):
     # Add GAN loss if requested.
     gan_loss = 0.0
     if hparams.gan_loss_factor != 0.0:
-      self.image_summary("gan", reconstr_gan)
+      self.image_summary("gan", reconstr_gan_nonoise)
 
       def discriminate(x):
-        return self.discriminator(x, is_training=is_training)
+        """Run a dioscriminator depending on the hparams."""
+        if hparams.discriminator == "default":
+          return common_layers.deep_discriminator(
+              x, hparams.discriminator_batchnorm, is_training)
+        elif hparams.discriminator == "patched":
+          return common_layers.patch_discriminator(x)
+        elif hparams.discriminator == "single":
+          return common_layers.single_discriminator(
+              x,
+              hparams.discriminator_size,
+              hparams.discriminator_kernel_size,
+              hparams.discriminator_strides,
+              pure_mean=hparams.discriminator_pure_mean)
+        elif hparams.discriminator == "double":
+          return common_layers.double_discriminator(
+              x,
+              hparams.discriminator_size,
+              hparams.discriminator_kernel_size,
+              hparams.discriminator_strides,
+              pure_mean=hparams.discriminator_pure_mean)
+        else:
+          raise Exception("Unknown discriminator %s" % hparams.discriminator)
 
       tc_shape = common_layers.shape_list(target_codes)
       if len(tc_shape) > 4:
@@ -349,13 +339,17 @@ class AutoencoderBasic(t2t_model.T2TModel):
           hparams.gan_codes_warmup_steps * 1.5)
       rev_grad_gan_codes = reverse_gradient(gan_codes, lr=gan_lr)
       gan_loss = common_layers.sliced_gan_loss(
-          target_codes, rev_grad_gan_codes, discriminate,
-          self.hparams.num_sliced_vecs)
-      gan_loss *= hparams.gan_loss_factor  * update_means_factor
+          target_codes,
+          rev_grad_gan_codes,
+          discriminate,
+          self.hparams.num_sliced_vecs,
+          do_tanh=hparams.sliced_do_tanh)
+      gan_loss *= hparams.gan_loss_factor * update_means_factor
       losses["gan_loss"] = -gan_loss
 
     self.image_summary("ae", reconstr)
-    logits = reconstr
+
+    logits = tf.reshape(reconstr, labels_shape + [vocab_size])
     return logits, losses
 
   def sample(self, features=None, shape=None):
@@ -455,7 +449,10 @@ class AutoencoderAutoregressive(AutoencoderBasic):
       assert hparams.mode == tf.estimator.ModeKeys.PREDICT
       targets = tf.zeros_like(basic_result)
     targets = self.embed(targets)
-    basic_hot = self.gumbel_sample(basic_result)
+    if hparams.autoregressive_gumbel_sample:
+      basic_hot = self.gumbel_sample(basic_result)
+    else:
+      basic_hot = basic_result
     basic_result = self.embed(basic_hot)
     shape = common_layers.shape_list(basic_result)
     basic1d = tf.reshape(basic_result, [shape[0], -1, shape[-1]])
@@ -551,8 +548,8 @@ class AutoencoderAutoregressive(AutoencoderBasic):
         samples = common_layers.sample_with_temperature(
             logits, self.hparams.sampling_temp)
         samples1d = tf.reshape(samples, [shape[0], -1, shape[3]])
-        samples1d = tf.concat(
-            [old_samples1d[:, :i, :], samples1d[:, i:, :]], axis=1)
+        samples1d = tf.concat([old_samples1d[:, :i, :], samples1d[:, i:, :]],
+                              axis=1)
         samples = tf.reshape(samples1d, shape)
 
     # Restore inputs to not confuse Estimator in edge cases.
@@ -597,6 +594,7 @@ class AutoencoderResidual(AutoencoderAutoregressive):
           x = self.dropout(x)
           filters = hparams.hidden_size * 2**(i + 1)
           filters = min(filters, hparams.max_hidden_size)
+          x = common_attention.add_timing_signal_nd(x)
           x = tf.layers.conv2d(
               x,
               filters,
@@ -606,6 +604,7 @@ class AutoencoderResidual(AutoencoderAutoregressive):
               activation=common_layers.belu,
               name="strided")
           y = x
+          y = tf.nn.dropout(y, 1.0 - hparams.residual_dropout)
           for r in range(hparams.num_residual_layers):
             residual_filters = filters
             if r < hparams.num_residual_layers - 1:
@@ -618,7 +617,7 @@ class AutoencoderResidual(AutoencoderAutoregressive):
                 padding="SAME",
                 activation=common_layers.belu,
                 name="residual_%d" % r)
-          x += tf.nn.dropout(y, 1.0 - hparams.residual_dropout)
+          x += y
           x = common_layers.layer_norm(x, name="ln")
       return x, layers
 
@@ -637,10 +636,11 @@ class AutoencoderResidual(AutoencoderAutoregressive):
       # Up-convolutions.
       for i in range(hparams.num_hidden_layers):
         j = hparams.num_hidden_layers - i - 1
-        nomix_p = common_layers.inverse_lin_decay(
-            int(hparams.bottleneck_warmup_steps * 0.25 * 2**j)) + 0.01
-        if common_layers.should_generate_summaries():
-          tf.summary.scalar("nomix_p_%d" % j, nomix_p)
+        if is_training:
+          nomix_p = common_layers.inverse_lin_decay(
+              int(hparams.bottleneck_warmup_steps * 0.25 * 2**j)) + 0.01
+          if common_layers.should_generate_summaries():
+            tf.summary.scalar("nomix_p_%d" % j, nomix_p)
         filters = hparams.hidden_size * 2**j
         filters = min(filters, hparams.max_hidden_size)
         with tf.variable_scope("layer_%d" % i):
@@ -705,8 +705,10 @@ class AutoencoderResidualVAE(AutoencoderResidual):
     hparams = self.hparams
     div_x = 2**hparams.num_hidden_layers
     div_y = 1 if self.is1d else 2**hparams.num_hidden_layers
-    size = [hparams.batch_size, hparams.sample_height // div_x,
-            hparams.sample_width // div_y, hparams.bottleneck_bits]
+    size = [
+        hparams.batch_size, hparams.sample_height // div_x,
+        hparams.sample_width // div_y, hparams.bottleneck_bits
+    ]
     size = size if shape is None else shape
     return tf.random_normal(size)
 
@@ -919,23 +921,29 @@ def autoencoder_basic():
   hparams.weight_decay = 0.0
   hparams.kernel_height = 4
   hparams.kernel_width = 4
-  hparams.dropout = 0.1
+  hparams.dropout = 0.05
   hparams.add_hparam("max_hidden_size", 1024)
   hparams.add_hparam("bottleneck_bits", 128)
   hparams.add_hparam("bottleneck_noise", 0.1)
-  hparams.add_hparam("bottleneck_warmup_steps", 500)
+  hparams.add_hparam("bottleneck_warmup_steps", 2000)
   hparams.add_hparam("sample_height", 32)
   hparams.add_hparam("sample_width", 32)
   hparams.add_hparam("discriminator_batchnorm", True)
-  hparams.add_hparam("num_sliced_vecs", 4096)
+  hparams.add_hparam("num_sliced_vecs", 20000)
+  hparams.add_hparam("sliced_do_tanh", int(True))
+  hparams.add_hparam("discriminator_size", 256)
+  hparams.add_hparam("discriminator_kernel_size", 6)
+  hparams.add_hparam("discriminator_strides", 4)
+  hparams.add_hparam("discriminator_pure_mean", int(False))
   hparams.add_hparam("code_loss_factor", 1.0)
-  hparams.add_hparam("gan_codes_warmup_steps", 6000)
+  hparams.add_hparam("gan_codes_warmup_steps", 16000)
   hparams.add_hparam("gan_loss_factor", 0.0)
   hparams.add_hparam("bottleneck_l2_factor", 0.05)
-  hparams.add_hparam("gumbel_temperature", 0.2)
-  hparams.add_hparam("gumbel_noise_factor", 0.4)
+  hparams.add_hparam("gumbel_temperature", 0.5)
+  hparams.add_hparam("gumbel_noise_factor", 0.5)
   hparams.add_hparam("vq_temperature", 0.001)
   hparams.add_hparam("use_vq_loss", int(False))
+  hparams.add_hparam("discriminator", "double")
   return hparams
 
 
@@ -947,6 +955,7 @@ def autoencoder_autoregressive():
   hparams.add_hparam("autoregressive_mode", "none")
   hparams.add_hparam("autoregressive_decode_steps", 0)
   hparams.add_hparam("autoregressive_eval_pure_autoencoder", False)
+  hparams.add_hparam("autoregressive_gumbel_sample", False)
   return hparams
 
 
@@ -994,9 +1003,9 @@ def autoencoder_basic_discrete():
   hparams = autoencoder_autoregressive()
   hparams.num_hidden_layers = 5
   hparams.hidden_size = 64
-  hparams.bottleneck_bits = 4096
+  hparams.bottleneck_bits = 1024
   hparams.bottleneck_noise = 0.1
-  hparams.add_hparam("discretize_warmup_steps", 5000)
+  hparams.add_hparam("discretize_warmup_steps", 16000)
   return hparams
 
 
@@ -1004,9 +1013,9 @@ def autoencoder_basic_discrete():
 def autoencoder_residual_discrete():
   """Residual discrete autoencoder model."""
   hparams = autoencoder_residual()
-  hparams.bottleneck_bits = 4096
-  hparams.bottleneck_noise = 0.1
-  hparams.add_hparam("discretize_warmup_steps", 5000)
+  hparams.bottleneck_bits = 1024
+  hparams.bottleneck_noise = 0.05
+  hparams.add_hparam("discretize_warmup_steps", 16000)
   hparams.add_hparam("bottleneck_kind", "tanh_discrete")
   hparams.add_hparam("isemhash_noise_dev", 0.5)
   hparams.add_hparam("isemhash_mix_prob", 0.5)
@@ -1032,9 +1041,37 @@ def autoencoder_residual_discrete_big():
 def autoencoder_ordered_discrete():
   """Ordered discrete autoencoder model."""
   hparams = autoencoder_residual_discrete()
-  hparams.bottleneck_noise = 0.8
-  hparams.gan_loss_factor = 0.02
-  hparams.add_hparam("unordered", False)
+  hparams.bottleneck_noise = 0.05  # Use 0.8 for ordered.
+  hparams.gan_loss_factor = 0.05
+  hparams.add_hparam("unordered", True)
+  return hparams
+
+
+@registry.register_hparams
+def autoencoder_ordered_discrete_image64():
+  """Ordered discrete autoencoder model."""
+  hparams = autoencoder_ordered_discrete()
+  hparams.batch_size = 32
+  hparams.num_hidden_layers = 6
+  hparams.target_modality = "video:default"
+  hparams.input_modalities = "video:default"
+
+  return hparams
+
+
+@registry.register_hparams
+def autoencoder_ordered_discrete_patched():
+  """Ordered discrete autoencoder model."""
+  hparams = autoencoder_ordered_discrete()
+  hparams.discriminator = "patched"
+  return hparams
+
+
+@registry.register_hparams
+def autoencoder_ordered_discrete_single():
+  """Ordered discrete autoencoder model."""
+  hparams = autoencoder_ordered_discrete()
+  hparams.discriminator = "single"
   return hparams
 
 
@@ -1050,13 +1087,14 @@ def autoencoder_ordered_discrete_hs256():
 def autoencoder_ordered_text():
   """Ordered discrete autoencoder model for text."""
   hparams = autoencoder_ordered_discrete()
-  hparams.bottleneck_bits = 1024
+  hparams.bottleneck_bits = 512
+  hparams.num_hidden_layers = 7
   hparams.batch_size = 1024
-  hparams.autoregressive_mode = "sru"
-  hparams.hidden_size = 256
-  hparams.max_hidden_size = 4096
+  hparams.autoregressive_mode = "conv5"
+  hparams.max_hidden_size = 1024
   hparams.target_modality = "symbol:identity"
   hparams.input_modalities = "symbol:identity"
+  hparams.sample_height = 128
   hparams.sample_width = 1
   return hparams
 
@@ -1065,11 +1103,13 @@ def autoencoder_ordered_text():
 def autoencoder_ordered_text_small():
   """Ordered discrete autoencoder model for text, small version."""
   hparams = autoencoder_ordered_text()
-  hparams.bottleneck_bits = 64
+  hparams.bottleneck_bits = 14
+  hparams.num_hidden_layers = 2
   hparams.hidden_size = 64
   hparams.max_hidden_size = 512
-  hparams.bottleneck_noise = 0.3
+  hparams.bottleneck_noise = 0.0
   hparams.autoregressive_mode = "conv5"
+  hparams.sample_height = 4
   return hparams
 
 
@@ -1091,7 +1131,7 @@ def autoencoder_discrete_pong():
   hparams.batch_size = 2
   hparams.bottleneck_noise = 0.2
   hparams.max_hidden_size = 1024
-  hparams.unordered = True
+  hparams.gan_loss_factor = 0.0
   return hparams
 
 
@@ -1101,7 +1141,6 @@ def autoencoder_discrete_cifar():
   hparams = autoencoder_ordered_discrete()
   hparams.bottleneck_noise = 0.0
   hparams.bottleneck_bits = 90
-  hparams.unordered = True
   hparams.num_hidden_layers = 2
   hparams.hidden_size = 256
   hparams.num_residual_layers = 4
@@ -1116,7 +1155,7 @@ def autoencoder_range(rhp):
   rhp.set_float("dropout", 0.01, 0.3)
   rhp.set_float("gan_loss_factor", 0.01, 0.1)
   rhp.set_float("bottleneck_l2_factor", 0.001, 0.1, scale=rhp.LOG_SCALE)
-  rhp.set_discrete("bottleneck_warmup_steps", [200, 500, 1000, 2000])
+  rhp.set_discrete("bottleneck_warmup_steps", [200, 2000])
   rhp.set_float("gumbel_temperature", 0, 1)
   rhp.set_float("gumbel_noise_factor", 0, 0.5)
 

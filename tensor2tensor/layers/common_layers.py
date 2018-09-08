@@ -133,14 +133,20 @@ def inverse_exp_decay(max_step, min_value=0.01, step=None):
   """Inverse-decay exponentially from 0.01 to 1.0 reached at max_step."""
   inv_base = tf.exp(tf.log(min_value) / float(max_step))
   if step is None:
-    step = tf.to_float(tf.train.get_global_step())
+    step = tf.train.get_global_step()
+  if step is None:
+    return 1.0
+  step = tf.to_float(step)
   return inv_base**tf.maximum(float(max_step) - step, 0.0)
 
 
 def inverse_lin_decay(max_step, min_value=0.01, step=None):
   """Inverse-decay linearly from 0.01 to 1.0 reached at max_step."""
   if step is None:
-    step = tf.to_float(tf.train.get_global_step())
+    step = tf.train.get_global_step()
+  if step is None:
+    return 1.0
+  step = tf.to_float(step)
   progress = tf.minimum(step / float(max_step), 1.0)
   return progress * (1.0 - min_value) + min_value
 
@@ -247,16 +253,16 @@ def expand_squeeze_to_nd(x, n, squeeze_dim=2, expand_dim=-1):
 
 
 def standardize_images(x):
-  """Image standardization on batches."""
+  """Image standardization on batches and videos."""
   with tf.name_scope("standardize_images", [x]):
-    x = tf.to_float(x)
+    x_shape = shape_list(x)
+    x = tf.to_float(tf.reshape(x, [-1] + x_shape[-3:]))
     x_mean = tf.reduce_mean(x, axis=[1, 2, 3], keepdims=True)
     x_variance = tf.reduce_mean(
         tf.square(x - x_mean), axis=[1, 2, 3], keepdims=True)
-    x_shape = shape_list(x)
-    num_pixels = tf.to_float(x_shape[1] * x_shape[2] * x_shape[3])
+    num_pixels = tf.to_float(x_shape[-1] * x_shape[-2] * x_shape[-3])
     x = (x - x_mean) / tf.maximum(tf.sqrt(x_variance), tf.rsqrt(num_pixels))
-    return x
+    return tf.reshape(x, x_shape)
 
 
 def flatten4d3d(x):
@@ -3387,8 +3393,7 @@ def belu(x):
 
 def nac(x, depth, name=None, reuse=None):
   """NAC as in https://arxiv.org/abs/1808.00508."""
-  with tf.variable_scope(
-      name, default_name="nac", values=[x], reuse=reuse):
+  with tf.variable_scope(name, default_name="nac", values=[x], reuse=reuse):
     x_shape = shape_list(x)
     w = tf.get_variable("w", [x_shape[-1], depth])
     m = tf.get_variable("m", [x_shape[-1], depth])
@@ -3400,8 +3405,7 @@ def nac(x, depth, name=None, reuse=None):
 
 def nalu(x, depth, epsilon=1e-30, name=None, reuse=None):
   """NALU as in https://arxiv.org/abs/1808.00508."""
-  with tf.variable_scope(
-      name, default_name="nalu", values=[x], reuse=reuse):
+  with tf.variable_scope(name, default_name="nalu", values=[x], reuse=reuse):
     x_shape = shape_list(x)
     x_flat = tf.reshape(x, [-1, x_shape[-1]])
     gw = tf.get_variable("w", [x_shape[-1], depth])
@@ -3641,7 +3645,7 @@ def sliced_gan_loss(input1,
       batch_size = shape_list(x)[0]
       if do_random_vecs and do_tanh:
         n = tf.nn.l2_normalize(x, axis=1)
-        proj = tf.concat([tf.matmul(n, random_vecs), tf.tanh(x)], axis=1)
+        proj = tf.concat([tf.matmul(n, random_vecs), tf.tanh(n)], axis=1)
       elif do_random_vecs:
         n = tf.nn.l2_normalize(x, axis=1)
         proj = tf.matmul(n, random_vecs)
@@ -3669,6 +3673,175 @@ def sliced_gan_loss(input1,
     if return_logits:
       return dist, logits1, logits2
     return dist
+
+
+def lrelu(input_, leak=0.2, name="lrelu"):
+  return tf.maximum(input_, leak * input_, name=name)
+
+
+def deep_discriminator(x,
+                       batch_norm,
+                       is_training,
+                       filters=64,
+                       filter_size=4,
+                       stride=2,
+                       output_size=1024):
+  """Discriminator architecture based on InfoGAN."""
+  with tf.variable_scope(
+      "discriminator", initializer=tf.random_normal_initializer(stddev=0.02)):
+    batch_size, height, width = shape_list(x)[:3]
+    net = tf.layers.conv2d(
+        x, filters, filter_size, strides=stride, padding="SAME", name="conv1")
+    net = lrelu(net)
+    net = tf.layers.conv2d(
+        net,
+        2 * filters,
+        filter_size,
+        strides=stride,
+        padding="SAME",
+        name="conv2")
+    # [bs, h/4, w/4, 128]
+    if batch_norm:
+      net = tf.layers.batch_normalization(
+          net, training=is_training, momentum=0.999, name="d_bn2")
+    net = lrelu(net)
+    size = height * width
+    x_shape = x.get_shape().as_list()
+    if x_shape[1] is None or x_shape[2] is None:
+      net = tf.reduce_mean(net, axis=[1, 2])
+    else:
+      net = tf.reshape(net, [batch_size, size * 8])
+    net = tf.layers.dense(net, output_size, name="d_fc3")
+    if batch_norm:
+      net = tf.layers.batch_normalization(
+          net, training=is_training, momentum=0.999, name="d_bn3")
+    net = lrelu(net)
+    return net
+
+
+def instance_norm(x):
+  """Instance normalization layer."""
+  with tf.variable_scope("instance_norm"):
+    epsilon = 1e-5
+    mean, var = tf.nn.moments(x, [1, 2], keep_dims=True)
+    scale = tf.get_variable(
+        "scale", [x.get_shape()[-1]],
+        initializer=tf.truncated_normal_initializer(mean=1.0, stddev=0.02))
+    offset = tf.get_variable(
+        "offset", [x.get_shape()[-1]], initializer=tf.constant_initializer(0.0))
+    out = scale * tf.div(x - mean, tf.sqrt(var + epsilon)) + offset
+
+    return out
+
+
+def general_conv(x,
+                 num_filters=64,
+                 filter_size=7,
+                 stride=1,
+                 stddev=0.02,
+                 padding="VALID",
+                 name="conv",
+                 do_norm="instance",
+                 do_relu=True,
+                 relufactor=0):
+  """Generalized convolution layer."""
+  with tf.variable_scope(name):
+    x = tf.layers.conv2d(
+        x,
+        num_filters,
+        filter_size,
+        stride,
+        padding,
+        activation=None,
+        kernel_initializer=tf.truncated_normal_initializer(stddev=stddev),
+        bias_initializer=tf.constant_initializer(0.0))
+    if do_norm == "layer":
+      x = tf.contrib.layers.layer_norm(x)
+    elif do_norm == "instance":
+      x = instance_norm(x)
+
+    if do_relu:
+      if relufactor == 0:
+        x = tf.nn.relu(x, "relu")
+      else:
+        x = lrelu(x, leak=relufactor)
+
+    return x
+
+
+def patch_discriminator(x, filters=64, filter_size=5, n=4,
+                        name="patch_discrim"):
+  """Patch descriminator."""
+  with tf.variable_scope(name):
+    x_shape = shape_list(x)
+    spatial_dims = [x_shape[1] // 4, x_shape[2] // 4]
+    x = tf.random_crop(x, [x_shape[0]] + spatial_dims + [x_shape[3]])
+    for i in range(n):
+      x = general_conv(
+          x=x,
+          num_filters=filters * 2**i,
+          filter_size=filter_size,
+          stride=2 if i != n - 1 else 1,
+          stddev=0.02,
+          padding="SAME",
+          name="c%d" % i,
+          do_norm="instance" if i != 0 else False,
+          do_relu=i != n - 1,
+          relufactor=0.2)
+    x = tf.reduce_mean(x, [1, 2])
+    return x
+
+
+def mean_with_attention(x, name, num_heads=4):
+  """Mean and attention to reduce spatial dimensions."""
+  with tf.variable_scope(name):
+    shape = shape_list(x)
+    m = tf.reduce_mean(x, [1, 2])
+    a = tf.layers.dense(x, num_heads, name="mean_attn")
+    s = tf.reshape(a, [shape[0], -1, num_heads])
+    s = tf.nn.softmax(s, axis=1)
+    s = tf.reshape(s, shape[:-1] + [1, num_heads])
+    am = tf.reduce_mean(tf.expand_dims(x, axis=-1) * s, [1, 2])
+    l = tf.concat([am, tf.expand_dims(m, axis=-1)], axis=-1)
+    return tf.layers.dense(tf.reshape(l, [shape[0], (num_heads+1) * shape[-1]]),
+                           2 * shape[-1], name="mean_attn_final")
+
+
+def single_discriminator(x, filters=128, kernel_size=7,
+                         strides=4, pure_mean=True):
+  """A simple single-layer convolutional discriminator."""
+  with tf.variable_scope("discriminator"):
+    net = tf.layers.conv2d(
+        x, filters, kernel_size, strides=strides, padding="SAME", name="conv1")
+    if pure_mean:
+      net = tf.reduce_mean(net, [1, 2])
+    else:
+      net = mean_with_attention(net, "mean_with_attention")
+    return net
+
+
+def double_discriminator(x, filters1=128, filters2=None,
+                         kernel_size=7, strides=4, pure_mean=True):
+  """A convolutional discriminator with 2 layers and concatenated output."""
+  if filters2 is None:
+    filters2 = 4 * filters1
+  with tf.variable_scope("discriminator"):
+    batch_size = shape_list(x)[0]
+    net = tf.layers.conv2d(
+        x, filters1, kernel_size, strides=strides, padding="SAME", name="conv1")
+    if pure_mean:
+      net1 = tf.reduce_mean(net, [1, 2])
+    else:
+      net1 = mean_with_attention(net, "mean_with_attention1")
+      tf.reshape(net, [batch_size, -1])
+    net = tf.nn.relu(net)
+    net = tf.layers.conv2d(
+        x, filters2, kernel_size, strides=strides, padding="SAME", name="conv2")
+    if pure_mean:
+      net2 = tf.reduce_mean(net, [1, 2])
+    else:
+      net2 = mean_with_attention(net, "mean_with_attention2")
+    return tf.concat([net1, net2], axis=-1)
 
 
 def upscale(inputs, f, method=tf.image.ResizeMethod.NEAREST_NEIGHBOR):
@@ -4026,10 +4199,8 @@ class WeightNorm(tf.keras.layers.Wrapper):
       self.layer.built = False
 
       if not hasattr(self.layer, "kernel"):
-        raise ValueError(
-            "`WeightNorm` must wrap a layer that"
-            " contains a `kernel` for weights"
-        )
+        raise ValueError("`WeightNorm` must wrap a layer that"
+                         " contains a `kernel` for weights")
 
       # The kernel's filter or unit dimension is -1
       self.layer_depth = int(self.layer.kernel.shape[-1])

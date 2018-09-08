@@ -303,18 +303,19 @@ class ImageChannelCompressModality(modality.Modality):
     return 3
 
   def bottom_compress(self, inputs, name="bottom"):
-    """Transform input from data space to model space.
+    """Compresses channel-wise input pixels into whole pixel representions.
 
-    Perform conversion of RGB pixel values to a real number in the range -1 to 1
-    and combine channel values for each pixel to form a representation of
-    size image_length x image_length dims.
+    Perform conversion of RGB pixel values to a real number in the range -1 to
+    1. This combines pixel channels to form a representation of shape
+    [img_len, img_len].
 
     Args:
-      inputs: A Tensor representing RGB pixel intensities as integers.
-        [batch, ...]
+      inputs: Tensor representing RGB pixel intensities as integers, of shape
+        [batch, img_len, img_len, channels].
       name: string, scope.
+
     Returns:
-      body_input: A Tensor with shape [batch, ?, ?, body_input_depth].
+      body_input: Tensor of shape [batch, img_len, img_len, body_input_depth].
     """
     with tf.variable_scope(name):
       inputs = tf.to_float(inputs)
@@ -325,19 +326,22 @@ class ImageChannelCompressModality(modality.Modality):
             common_layers.tpu_safe_image_summary(inputs),
             max_outputs=2)
       inputs = common_layers.convert_rgb_to_symmetric_real(inputs)
-      ishape = common_layers.shape_list(inputs)
-      inputs = tf.reshape(inputs, [-1, ishape[1], ishape[2] * ishape[3], 1])
-      inputs.set_shape([None, None, None, 1])
-      # We compress RGB intensities for each pixel using a conv.
-      x = tf.layers.conv2d(
+
+      # Reshape inputs to apply convolutions across [img_len, img_len*channels].
+      inputs_shape = common_layers.shape_list(inputs)
+      inputs = tf.reshape(
+          inputs, [-1, inputs_shape[1], inputs_shape[2] * inputs_shape[3], 1])
+
+      # Compress RGB intensities for each pixel using a convolution.
+      outputs = tf.layers.conv2d(
           inputs,
-          self._body_input_depth, (1, self.num_channels),
+          self._body_input_depth,
+          kernel_size=(1, self.num_channels),
           padding="VALID",
           strides=(1, self.num_channels),
           activation=tf.nn.relu,
           name="conv_input")
-      x.set_shape([None, None, None, self._body_input_depth])
-      return x
+      return outputs
 
   def bottom(self, x):
     return self.bottom_compress(x, "input_bottom")
@@ -346,24 +350,36 @@ class ImageChannelCompressModality(modality.Modality):
     return self.bottom_compress(x, "output_bottom")
 
   def top(self, body_output, _):
+    """Transforms body output to return logits.
+
+    Args:
+      body_output: Tensor of shape [batch, img_len, img_len, depth].
+
+    Returns:
+      Tensor of shape [batch, img_len, img_len, channels, top_dimensionality].
+    """
     with tf.variable_scope(self.name):
-      hidden_dim = self._model_hparams.hidden_size
+      hidden_size = self._model_hparams.hidden_size
       img_len = self._model_hparams.img_len
       channels = self.num_channels  # RGB
       batch = common_layers.shape_list(body_output)[0]
       x = tf.layers.conv2d(
           body_output,
-          hidden_dim * channels, (1, 1),
+          hidden_size * channels,
+          kernel_size=(1, 1),
           strides=(1, 1),
           padding="VALID",
           activation=tf.nn.relu,
           name="decompress_conv")
-      x = tf.reshape(x, [batch, img_len, img_len * channels, hidden_dim])
+      x = tf.reshape(x, [batch, img_len, img_len * channels, hidden_size])
       x = common_layers.layer_preprocess(x, self._model_hparams)
-      x = tf.layers.dense(
-          x, 256, use_bias=True, activation=None, name="output_conv")
-      x = tf.reshape(x,
-                     [-1, img_len, img_len, channels, self.top_dimensionality])
+      x = tf.layers.dense(x,
+                          self.top_dimensionality,
+                          use_bias=True,
+                          activation=None,
+                          name="output_conv")
+      x = tf.reshape(
+          x, [batch, img_len, img_len, channels, self.top_dimensionality])
       return x
 
 
@@ -511,26 +527,16 @@ class AudioSpectralModality(modality.Modality):
                            "compress_block_final")
 
 
-@registry.register_video_modality("default")
 class VideoModality(modality.Modality):
   """Modality for videos, i.e., time-sequences of frames."""
   PIXEL_EMBEDDING_SIZE = 64
 
   def bottom(self, x):
     inputs = x
-    with tf.variable_scope(self.name):
+    with tf.variable_scope(self.name, reuse=tf.AUTO_REUSE):
       common_layers.summarize_video(inputs, "inputs")
-      inputs_shape = common_layers.shape_list(inputs)
-      # Standardize frames.
-      inputs = tf.reshape(inputs, [-1] + inputs_shape[2:])
       inputs = common_layers.standardize_images(inputs)
-      inputs = tf.reshape(inputs, inputs_shape)
-      # Concatenate the time dimension on channels for image models to work.
-      transposed = tf.transpose(inputs, [0, 2, 3, 1, 4])
-      return tf.reshape(transposed, [
-          inputs_shape[0], inputs_shape[2], inputs_shape[3],
-          inputs_shape[1] * inputs_shape[4]
-      ])
+      return common_layers.time_to_channels(inputs)
 
   def targets_bottom(self, x, summary_prefix="targets_bottom"):  # pylint: disable=arguments-differ
     inputs = x
@@ -553,24 +559,23 @@ class VideoModality(modality.Modality):
           self._body_input_depth,
           name="merge_pixel_embedded_frames")
 
-  def top(self, body_output, _):
+  def top(self, body_output, targets):
     num_channels = self._model_hparams.problem.num_channels
-    num_frames = self._model_hparams.video_num_target_frames
-    with tf.variable_scope("rgb_softmax"):
-      body_output_shape = common_layers.shape_list(body_output)
-      reshape_shape = body_output_shape[:3]
-      reshape_shape.extend([num_channels, num_frames, self.top_dimensionality])
-      res = tf.layers.dense(body_output,
-                            self.top_dimensionality * num_channels * num_frames)
-      res = tf.reshape(res, reshape_shape)
-      res = tf.transpose(res, [0, 4, 1, 2, 3, 5])
-      if not tf.get_variable_scope().reuse:
-        res_argmax = tf.argmax(res[:, -1, :, :, :, :], axis=-1)
-        tf.summary.image(
-            "result",
-            common_layers.tpu_safe_image_summary(res_argmax),
-            max_outputs=1)
-      return res
+    num_frames = common_layers.shape_list(targets)[1]
+    body_output_shape = common_layers.shape_list(body_output)
+    # We assume the body output is of this shape and layout.
+    # Note: if you tf.concat([frames], axis=-1) at the end of your model,
+    # then you need to reshape to [..., num_frames, depth] like below, not
+    # into [..., depth, num_frames] due to memory layout of concat/reshape.
+    reshape_shape = body_output_shape[:-1] + [
+        num_channels, num_frames, self.top_dimensionality]
+    res = tf.reshape(body_output, reshape_shape)
+    res = tf.transpose(res, [0, 4, 1, 2, 3, 5])
+    res_shape = common_layers.shape_list(res)
+    res_argmax = tf.argmax(tf.reshape(res, [-1, res_shape[-1]]), axis=-1)
+    res_argmax = tf.reshape(res_argmax, res_shape[:-1])
+    common_layers.summarize_video(res_argmax, "result")
+    return res
 
   def loss(self, top_out, targets):
     """Compute loss numerator and denominator for one shard of output."""
@@ -584,6 +589,14 @@ class VideoModality(modality.Modality):
         self._model_hparams.label_smoothing,
         cutoff=cutoff,
         weights_fn=self.targets_weights_fn)
+
+
+@registry.register_video_modality("default")
+class VideoModalityNoEmbed(VideoModality):
+  """Video Modality where target_bottom does not embeds pixels."""
+
+  def targets_bottom(self, x):
+    return super(VideoModalityNoEmbed, self).bottom(x)
 
 
 @registry.register_video_modality("embed")

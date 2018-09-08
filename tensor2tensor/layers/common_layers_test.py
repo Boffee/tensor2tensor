@@ -26,9 +26,9 @@ from tensor2tensor.layers import common_layers
 import tensorflow as tf
 
 
-@tf.contrib.eager.run_all_tests_in_graph_and_eager_modes
 class CommonLayersTest(parameterized.TestCase, tf.test.TestCase):
 
+  @tf.contrib.eager.run_test_in_graph_and_eager_modes()
   def testIndexLastDimWithIndices(self):
     x = np.array([[2., 3., 4., 5.],
                   [6., 7., 8., 9.]])
@@ -38,12 +38,14 @@ class CommonLayersTest(parameterized.TestCase, tf.test.TestCase):
     expected = np.array([4., 6.])
     self.assertAllEqual(expected, self.evaluate(x_idx))
 
+  @tf.contrib.eager.run_test_in_graph_and_eager_modes()
   def testSaturatingSigmoid(self):
     x = np.array([-120.0, -100.0, 0.0, 100.0, 120.0], dtype=np.float32)
     y = common_layers.saturating_sigmoid(tf.constant(x))
     res = self.evaluate(y)
     self.assertAllClose(res, [0.0, 0.0, 0.5, 1.0, 1.0])
 
+  @tf.contrib.eager.run_test_in_graph_and_eager_modes()
   def testFlatten4D3D(self):
     x = np.random.random_integers(1, high=8, size=(3, 5, 2))
     y = common_layers.flatten4d3d(common_layers.embedding(x, 10, 7))
@@ -51,6 +53,7 @@ class CommonLayersTest(parameterized.TestCase, tf.test.TestCase):
     res = self.evaluate(y)
     self.assertEqual(res.shape, (3, 5 * 2, 7))
 
+  @tf.contrib.eager.run_test_in_graph_and_eager_modes()
   def testEmbedding(self):
     x = np.random.random_integers(1, high=8, size=(3, 5))
     y = common_layers.embedding(x, 10, 16)
@@ -59,16 +62,14 @@ class CommonLayersTest(parameterized.TestCase, tf.test.TestCase):
     self.assertEqual(res.shape, (3, 5, 16))
 
   def testShakeShake(self):
-    if tf.executing_eagerly():
-      return  # don't run test in Eager mode
-
     x = np.random.rand(5, 7)
-    with self.session() as session:
+    with self.test_session() as session:
       x = tf.constant(x, dtype=tf.float32)
       y = common_layers.shakeshake([x, x, x, x, x])
       inp, res = session.run([x, y])
     self.assertAllClose(res, inp)
 
+  @tf.contrib.eager.run_test_in_graph_and_eager_modes()
   def testConv(self):
     x = np.random.rand(5, 7, 1, 11)
     y = common_layers.conv(tf.constant(x, dtype=tf.float32), 13, (3, 1))
@@ -76,6 +77,7 @@ class CommonLayersTest(parameterized.TestCase, tf.test.TestCase):
     res = self.evaluate(y)
     self.assertEqual(res.shape, (5, 5, 1, 13))
 
+  @tf.contrib.eager.run_test_in_graph_and_eager_modes()
   def testConv1d(self):
     x = np.random.rand(5, 7, 11)
     y = common_layers.conv1d(tf.constant(x, dtype=tf.float32), 13, 1)
@@ -83,6 +85,7 @@ class CommonLayersTest(parameterized.TestCase, tf.test.TestCase):
     res = self.evaluate(y)
     self.assertEqual(res.shape, (5, 7, 13))
 
+  @tf.contrib.eager.run_test_in_graph_and_eager_modes()
   def testSeparableConv(self):
     x = np.random.rand(5, 7, 1, 11)
     y = common_layers.separable_conv(
@@ -91,6 +94,7 @@ class CommonLayersTest(parameterized.TestCase, tf.test.TestCase):
     res = self.evaluate(y)
     self.assertEqual(res.shape, (5, 5, 1, 13))
 
+  @tf.contrib.eager.run_test_in_graph_and_eager_modes()
   def testSubSeparableConv(self):
     for sep in [0, 1, 2, 4]:
       x = np.random.rand(5, 7, 1, 12)
@@ -101,6 +105,7 @@ class CommonLayersTest(parameterized.TestCase, tf.test.TestCase):
       res = self.evaluate(y)
       self.assertEqual(res.shape, (5, 5, 1, 16))
 
+  @tf.contrib.eager.run_test_in_graph_and_eager_modes()
   def testConvBlock(self):
     x = np.random.rand(5, 7, 1, 11)
     y = common_layers.conv_block(
@@ -112,6 +117,7 @@ class CommonLayersTest(parameterized.TestCase, tf.test.TestCase):
     res = self.evaluate(y)
     self.assertEqual(res.shape, (5, 7, 1, 13))
 
+  @tf.contrib.eager.run_test_in_graph_and_eager_modes()
   def testSeparableConvBlock(self):
     x = np.random.rand(5, 7, 1, 11)
     y = common_layers.separable_conv_block(
@@ -122,6 +128,7 @@ class CommonLayersTest(parameterized.TestCase, tf.test.TestCase):
     res = self.evaluate(y)
     self.assertEqual(res.shape, (5, 7, 1, 13))
 
+  @tf.contrib.eager.run_test_in_graph_and_eager_modes()
   def testSubSeparableConvBlock(self):
     for sep in [0, 1, 2, 4]:
       x = np.random.rand(5, 7, 1, 12)
@@ -135,6 +142,7 @@ class CommonLayersTest(parameterized.TestCase, tf.test.TestCase):
       res = self.evaluate(y)
       self.assertEqual(res.shape, (5, 7, 1, 16))
 
+  @tf.contrib.eager.run_test_in_graph_and_eager_modes()
   def testPool(self):
     x = np.random.rand(5, 8, 1, 11)
     y = common_layers.pool(
@@ -143,6 +151,7 @@ class CommonLayersTest(parameterized.TestCase, tf.test.TestCase):
     res = self.evaluate(y)
     self.assertEqual(res.shape, (5, 8, 1, 11))
 
+  @tf.contrib.eager.run_test_in_graph_and_eager_modes()
   def testConvBlockDownsample(self):
     x = np.random.rand(5, 7, 1, 11)
     y = common_layers.conv_block_downsample(
@@ -151,6 +160,7 @@ class CommonLayersTest(parameterized.TestCase, tf.test.TestCase):
     res = self.evaluate(y)
     self.assertEqual(res.shape, (5, 4, 1, 27))
 
+  @tf.contrib.eager.run_test_in_graph_and_eager_modes()
   def testSimpleAttention(self):
     x = np.random.rand(5, 7, 1, 11)
     y = np.random.rand(5, 9, 1, 11)
@@ -159,6 +169,7 @@ class CommonLayersTest(parameterized.TestCase, tf.test.TestCase):
     res = self.evaluate(a)
     self.assertEqual(res.shape, (5, 7, 1, 11))
 
+  @tf.contrib.eager.run_test_in_graph_and_eager_modes()
   def testGetTimingSignal(self):
     length = 7
     num_timescales = 10
@@ -166,6 +177,7 @@ class CommonLayersTest(parameterized.TestCase, tf.test.TestCase):
     res = self.evaluate(a)
     self.assertEqual(res.shape, (length, 2 * num_timescales))
 
+  @tf.contrib.eager.run_test_in_graph_and_eager_modes()
   def testAddTimingSignal(self):
     batch = 5
     length = 7
@@ -176,6 +188,7 @@ class CommonLayersTest(parameterized.TestCase, tf.test.TestCase):
     res = self.evaluate(a)
     self.assertEqual(res.shape, (batch, length, height, depth))
 
+  @tf.contrib.eager.run_test_in_graph_and_eager_modes()
   def testAttention1D(self):
     batch = 5
     target_length = 7
@@ -196,6 +209,7 @@ class CommonLayersTest(parameterized.TestCase, tf.test.TestCase):
     res = self.evaluate(a)
     self.assertEqual(res.shape, (batch, target_length, output_size))
 
+  @tf.contrib.eager.run_test_in_graph_and_eager_modes()
   def testMultiscaleConvSum(self):
     x = np.random.rand(5, 9, 1, 11)
     y = common_layers.multiscale_conv_sum(
@@ -207,6 +221,7 @@ class CommonLayersTest(parameterized.TestCase, tf.test.TestCase):
     res = self.evaluate(y)
     self.assertEqual(res.shape, (5, 9, 1, 13))
 
+  @tf.contrib.eager.run_test_in_graph_and_eager_modes()
   def testConvGRU(self):
     x = np.random.rand(5, 7, 3, 11)
     y = common_layers.conv_gru(tf.constant(x, dtype=tf.float32), (1, 3), 11)
@@ -219,16 +234,14 @@ class CommonLayersTest(parameterized.TestCase, tf.test.TestCase):
     self.assertEqual(res2.shape, (5, 7, 3, 11))
 
   def testSRU(self):
-    if tf.executing_eagerly():
-      return  # don't run test in Eager mode
-
     x = np.random.rand(5, 7, 3, 11)
-    with self.session() as session:
+    with self.test_session() as session:
       y = common_layers.sru(tf.constant(x, dtype=tf.float32))
       session.run(tf.global_variables_initializer())
       res = session.run(y)
     self.assertEqual(res.shape, (5, 7, 3, 11))
 
+  @tf.contrib.eager.run_test_in_graph_and_eager_modes()
   def testLayerNorm(self):
     x = np.random.rand(5, 7, 11)
     y = common_layers.layer_norm(tf.constant(x, dtype=tf.float32), 11)
@@ -236,6 +249,7 @@ class CommonLayersTest(parameterized.TestCase, tf.test.TestCase):
     res = self.evaluate(y)
     self.assertEqual(res.shape, (5, 7, 11))
 
+  @tf.contrib.eager.run_test_in_graph_and_eager_modes()
   def testGroupNorm(self):
     x = np.random.rand(5, 7, 3, 16)
     y = common_layers.group_norm(tf.constant(x, dtype=tf.float32))
@@ -243,6 +257,7 @@ class CommonLayersTest(parameterized.TestCase, tf.test.TestCase):
     res = self.evaluate(y)
     self.assertEqual(res.shape, (5, 7, 3, 16))
 
+  @tf.contrib.eager.run_test_in_graph_and_eager_modes()
   def testConvLSTM(self):
     x = np.random.rand(5, 7, 11, 13)
     y = common_layers.conv_lstm(tf.constant(x, dtype=tf.float32), (1, 3), 13)
@@ -250,6 +265,7 @@ class CommonLayersTest(parameterized.TestCase, tf.test.TestCase):
     res = self.evaluate(y)
     self.assertEqual(res.shape, (5, 7, 11, 13))
 
+  @tf.contrib.eager.run_test_in_graph_and_eager_modes()
   def testPadToSameLength(self):
     x1 = np.random.rand(5, 7, 11)
     x2 = np.random.rand(5, 9, 11)
@@ -266,6 +282,7 @@ class CommonLayersTest(parameterized.TestCase, tf.test.TestCase):
     self.assertEqual(res1a.shape, (5, 12, 11))
     self.assertEqual(res2a.shape, (5, 12, 11))
 
+  @tf.contrib.eager.run_test_in_graph_and_eager_modes()
   def testShiftLeft(self):
     x1 = np.zeros((5, 7, 1, 11))
     x1[:, 0, :] = np.ones_like(x1[:, 0, :])
@@ -275,6 +292,7 @@ class CommonLayersTest(parameterized.TestCase, tf.test.TestCase):
     actual = self.evaluate(a)
     self.assertAllEqual(actual, expected)
 
+  @tf.contrib.eager.run_test_in_graph_and_eager_modes()
   def testConvStride2MultiStep(self):
     x1 = np.random.rand(5, 32, 16, 11)
     a = common_layers.conv_stride2_multistep(
@@ -283,6 +301,7 @@ class CommonLayersTest(parameterized.TestCase, tf.test.TestCase):
     actual = self.evaluate(a[0])
     self.assertEqual(actual.shape, (5, 2, 1, 16))
 
+  @tf.contrib.eager.run_test_in_graph_and_eager_modes()
   def testDeconvStride2MultiStep(self):
     x1 = np.random.rand(5, 2, 1, 11)
     a = common_layers.deconv_stride2_multistep(
@@ -291,6 +310,7 @@ class CommonLayersTest(parameterized.TestCase, tf.test.TestCase):
     actual = self.evaluate(a)
     self.assertEqual(actual.shape, (5, 32, 1, 16))
 
+  @tf.contrib.eager.run_test_in_graph_and_eager_modes()
   def testApplyNormLayer(self):
     x1 = np.random.rand(5, 2, 1, 11)
     x2 = common_layers.apply_norm(
@@ -299,6 +319,7 @@ class CommonLayersTest(parameterized.TestCase, tf.test.TestCase):
     actual = self.evaluate(x2)
     self.assertEqual(actual.shape, (5, 2, 1, 11))
 
+  @tf.contrib.eager.run_test_in_graph_and_eager_modes()
   def testApplyNormNoam(self):
     x1 = np.random.rand(5, 2, 1, 11)
     x2 = common_layers.apply_norm(
@@ -307,6 +328,7 @@ class CommonLayersTest(parameterized.TestCase, tf.test.TestCase):
     actual = self.evaluate(x2)
     self.assertEqual(actual.shape, (5, 2, 1, 11))
 
+  @tf.contrib.eager.run_test_in_graph_and_eager_modes()
   def testApplyNormBatch(self):
     x1 = np.random.rand(5, 2, 1, 11)
     x2 = common_layers.apply_norm(
@@ -315,6 +337,7 @@ class CommonLayersTest(parameterized.TestCase, tf.test.TestCase):
     actual = self.evaluate(x2)
     self.assertEqual(actual.shape, (5, 2, 1, 11))
 
+  @tf.contrib.eager.run_test_in_graph_and_eager_modes()
   def testApplyNormNone(self):
     x1 = np.random.rand(5, 2, 1, 11)
     x2 = common_layers.apply_norm(
@@ -373,18 +396,21 @@ class CommonLayersTest(parameterized.TestCase, tf.test.TestCase):
     actual = self.evaluate(layer)
     self.assertEqual(actual.shape, (5, 4, 32))
 
+  @tf.contrib.eager.run_test_in_graph_and_eager_modes()
   def testBReLU(self):
     x = np.random.rand(5, 2, 1, 12)
     y = common_layers.brelu(tf.constant(x, dtype=tf.float32))
     actual = self.evaluate(y)
     self.assertEqual(actual.shape, (5, 2, 1, 12))
 
+  @tf.contrib.eager.run_test_in_graph_and_eager_modes()
   def testBELU(self):
     x = np.random.rand(5, 2, 1, 12)
     y = common_layers.belu(tf.constant(x, dtype=tf.float32))
     actual = self.evaluate(y)
     self.assertEqual(actual.shape, (5, 2, 1, 12))
 
+  @tf.contrib.eager.run_test_in_graph_and_eager_modes()
   def testNAC(self):
     x = np.random.rand(5, 2, 1, 12)
     y = common_layers.nac(tf.constant(x, dtype=tf.float32), 14)
@@ -392,6 +418,7 @@ class CommonLayersTest(parameterized.TestCase, tf.test.TestCase):
     actual = self.evaluate(y)
     self.assertEqual(actual.shape, (5, 2, 1, 14))
 
+  @tf.contrib.eager.run_test_in_graph_and_eager_modes()
   def testNALU(self):
     x = np.random.rand(5, 2, 1, 12)
     y = common_layers.nalu(tf.constant(x, dtype=tf.float32), 14)
@@ -399,6 +426,7 @@ class CommonLayersTest(parameterized.TestCase, tf.test.TestCase):
     actual = self.evaluate(y)
     self.assertEqual(actual.shape, (5, 2, 1, 14))
 
+  @tf.contrib.eager.run_test_in_graph_and_eager_modes()
   def testNALUzeros(self):
     x = np.random.rand(5, 2, 1, 12)
     y = common_layers.nalu(tf.zeros_like(x, dtype=tf.float32), 14)
@@ -408,9 +436,6 @@ class CommonLayersTest(parameterized.TestCase, tf.test.TestCase):
     self.assertEqual(actual.shape, (5, 2, 1, 14))
 
   def testPaddingCrossEntropyFactored(self):
-    if tf.executing_eagerly():
-      return  # don't run test in Eager mode
-
     vocab_size = 19
     rows = 5
     cols = 4
@@ -419,7 +444,7 @@ class CommonLayersTest(parameterized.TestCase, tf.test.TestCase):
     features = np.random.rand(rows, cols, depth)
     weights = np.random.rand(vocab_size, depth)
     labels = np.random.randint(0, vocab_size - 1, size=(rows, cols))
-    with self.session() as session:
+    with self.test_session() as session:
       features = tf.to_float(features)
       weights = tf.to_float(weights)
       labels = tf.to_int32(labels)
@@ -444,9 +469,6 @@ class CommonLayersTest(parameterized.TestCase, tf.test.TestCase):
     self.assertAllClose(den, den_f)
 
   def testPaddingCrossEntropyFactoredGrad(self):
-    if tf.executing_eagerly():
-      return  # don't run test in Eager mode
-
     vocab_size = 19
     rows = 5
     cols = 4
@@ -455,7 +477,7 @@ class CommonLayersTest(parameterized.TestCase, tf.test.TestCase):
     features = np.random.rand(rows, cols, depth)
     weights = np.random.rand(vocab_size, depth)
     labels = np.random.randint(0, vocab_size - 1, size=(rows, cols))
-    with self.session() as session:
+    with self.test_session() as session:
       features = tf.to_float(features)
       weights = tf.to_float(weights)
       labels = tf.to_int32(labels)
@@ -508,6 +530,7 @@ class CommonLayersTest(parameterized.TestCase, tf.test.TestCase):
         [actual_loss, expected_loss])
     self.assertAllClose(actual_loss_val, expected_loss_val)
 
+  @tf.contrib.eager.run_test_in_graph_and_eager_modes()
   def testDiscretizedMixLogisticLoss(self):
     batch = 2
     height = 4
@@ -544,6 +567,7 @@ class CommonLayersTest(parameterized.TestCase, tf.test.TestCase):
         [actual_loss, expected_loss])
     self.assertAllClose(actual_loss_val, expected_loss_val, rtol=1e-5)
 
+  @tf.contrib.eager.run_test_in_graph_and_eager_modes()
   def testSampleFromDiscretizedMixLogistic(self):
     batch = 2
     height = 4
@@ -571,6 +595,7 @@ class CommonLayersTest(parameterized.TestCase, tf.test.TestCase):
     # implementation clips log-scales so they always contribute to sampling.
     self.assertAllClose(actual_sample_val, expected_sample_val, atol=1e-2)
 
+  @tf.contrib.eager.run_test_in_graph_and_eager_modes()
   def testFactoredTensorImplicitConversion(self):
     a = np.random.rand(3, 4, 5)
     b = np.random.rand(6, 5)
@@ -583,16 +608,13 @@ class CommonLayersTest(parameterized.TestCase, tf.test.TestCase):
     self.assertEqual(out.shape, (3, 4, 6))
 
   def testConvHiddenReluMemoryEfficient(self):
-    if tf.executing_eagerly():
-      return  # don't run test in Eager mode
-
     batch = 3
     length = 23
     io_size = 16
     filter_size = 7
     x = np.random.rand(batch, length, io_size)
     dy = np.random.rand(batch, length, io_size)
-    with self.session() as session:
+    with self.test_session() as session:
       x = tf.to_float(x)
       dy = tf.to_float(dy)
       f1 = tf.get_variable("f1", [1, io_size, filter_size])
@@ -622,6 +644,7 @@ class CommonLayersTest(parameterized.TestCase, tf.test.TestCase):
     self.assertAllClose(dnorm_bias, dnorm_bias_f)
     self.assertAllClose(dx, dx_f)
 
+  @tf.contrib.eager.run_test_in_graph_and_eager_modes()
   def testCycleGANUpsampleNnUpsampleConv(self):
     batch = 8
     height = 32
@@ -641,6 +664,7 @@ class CommonLayersTest(parameterized.TestCase, tf.test.TestCase):
         [batch, height * stride[0], width * stride[1], output_filters],
         self.evaluate(upsampled_output_shape))
 
+  @tf.contrib.eager.run_test_in_graph_and_eager_modes()
   def testCycleGANUpsampleBilinearUpsampleConv(self):
     batch = 8
     height = 32
@@ -660,6 +684,7 @@ class CommonLayersTest(parameterized.TestCase, tf.test.TestCase):
         [batch, height * stride[0], width * stride[1], output_filters],
         self.evaluate(upsampled_output_shape))
 
+  @tf.contrib.eager.run_test_in_graph_and_eager_modes()
   def testCycleGANUpsampleConv2dTranspose(self):
     batch = 8
     height = 32
@@ -685,9 +710,6 @@ class CommonLayersTest(parameterized.TestCase, tf.test.TestCase):
         self.evaluate(upsampled_output_shape))
 
   def testSpectralNorm(self):
-    if tf.executing_eagerly():
-      return  # don't run test in Eager mode
-
     # Test that after 20 calls to apply_spectral_norm, the spectral
     # norm of the normalized matrix is close to 1.0
     with tf.Graph().as_default():
@@ -746,7 +768,7 @@ class FnWithCustomGradTest(tf.test.TestCase):
     custom_grads = tf.gradients(custom_loss,
                                 [a, b, c] + [tf.trainable_variables()[1]])
 
-    with self.session() as sess:
+    with self.test_session() as sess:
       sess.run(tf.global_variables_initializer())
       out_val, custom_out_val, grads_val, custom_grads_val = sess.run(
           [out, custom_out, grads, custom_grads])
@@ -777,7 +799,7 @@ class FnWithCustomGradTest(tf.test.TestCase):
     expected_grads = [
         tf.ones_like(t) * (i + 1.) for i, t in enumerate([a, b, c, w])
     ]
-    with self.session() as sess:
+    with self.test_session() as sess:
       sess.run(tf.global_variables_initializer())
       g_val, eg_val = sess.run([grads, expected_grads])
       for g1, g2 in zip(g_val, eg_val):
@@ -823,7 +845,7 @@ class RecomputeTest(tf.test.TestCase):
     grad1 = tf.gradients(out1, recompute_vars)
     grad2 = tf.gradients(out2, reg_vars)
 
-    with self.session() as sess:
+    with self.test_session() as sess:
       sess.run(tf.global_variables_initializer())
       outs = sess.run([out1, out2, grad1, grad2])
       self.assertAllClose(outs[0], outs[1])

@@ -221,7 +221,6 @@ def image_transformer_base():
   hparams.add_hparam("block_width", 128)
   hparams.add_hparam("num_encoder_layers", 4)
   hparams.add_hparam("num_decoder_layers", 12)
-  hparams.sep_rgb_embed = False
   hparams.add_hparam("dec_attention_type", cia.AttentionType.LOCAL_1D)
   hparams.add_hparam("block_raster_scan", False)
 
@@ -295,6 +294,39 @@ def imagetransformer_cifar10_base_dmol():
   hparams.layer_postprocess_sequence = "dan"
   hparams.pos = "emb"
   hparams.unconditional = True
+  return hparams
+
+
+@registry.register_hparams
+def imagetransformer_base_tpu():
+  """Transformer base params for cifar-10."""
+  hparams = imagetransformer_bas8l_8h_big_uncond_dr03_imgnet()
+  update_hparams_for_tpu(hparams)
+  hparams.batch_size = 4
+  hparams.num_heads = 4   # heads are expensive on tpu
+  hparams.num_decoder_layers = 12
+  hparams.block_length = 128
+  hparams.hidden_size = 512
+  hparams.filter_size = 2048
+  hparams.learning_rate = 0.2
+  hparams.learning_rate_warmup_steps = 6000
+  hparams.layer_preprocess_sequence = "none"
+  hparams.layer_postprocess_sequence = "dan"
+  hparams.layer_prepostprocess_dropout = 0.3
+  return hparams
+
+
+@registry.register_hparams
+def imagetransformer_base_imagenet_tpu():
+  """Transformer base params for cifar-10."""
+  hparams = imagetransformer_base_tpu()
+  hparams.batch_size = 4
+  hparams.num_heads = 4   # heads are expensive on tpu
+  hparams.num_decoder_layers = 12
+  hparams.block_length = 128
+  hparams.layer_preprocess_sequence = "none"
+  hparams.layer_postprocess_sequence = "dan"
+  hparams.layer_prepostprocess_dropout = 0.1
   return hparams
 
 
@@ -756,7 +788,6 @@ def imagetransformer_sep_channels_16l_16h_imgnet_lrg_loc_128():
 def imagetransformer_sep_output_channels_8l_local_and_global_att():
   """separate rgb embeddings."""
   hparams = imagetransformer_sep_channels_8l()
-  hparams.sep_rgb_embed = True
   hparams.sampling_method = "random"
   hparams.local_and_global_att = True
   return hparams
@@ -897,23 +928,10 @@ def imagetransformer_moe_tiny():
 
 
 def update_hparams_for_tpu(hparams):
-  hparams.optimizer = "TrueAdam"
+  hparams.optimizer = "Adafactor"
+  hparams.learning_rate_schedule = "rsqrt_decay"
+  hparams.learning_rate_warmup_steps = 6000
   hparams.batch_size = 4
-
-
-@registry.register_hparams
-def imagetransformer_base_tpu():
-  """Transformer base params for cifar-10."""
-  hparams = imagetransformer_bas8l_8h_big_uncond_dr03_imgnet()
-  update_hparams_for_tpu(hparams)
-  hparams.batch_size = 4
-  hparams.num_heads = 4   # heads are expensive on tpu
-  hparams.num_decoder_layers = 12
-  hparams.block_length = 128
-  hparams.layer_preprocess_sequence = "none"
-  hparams.layer_postprocess_sequence = "dan"
-  hparams.layer_prepostprocess_dropout = 0.3
-  return hparams
 
 
 @registry.register_hparams
@@ -1061,11 +1079,14 @@ def imagetransformer_b12l_4h_b128_h512_uncond_dr03_tpu():
 
 
 @registry.register_hparams
-def imagetransformer_b12l_4h_b128_h512_uncond_dr03_im():
+def imagetransformer_b12l_4h_b128_h512_uncond_dr01_im():
   """TPU related imagenet model."""
   hparams = imagetransformer_b12l_4h_b256_uncond_dr03_tpu()
   update_hparams_for_tpu(hparams)
   hparams.batch_size = 4
+  hparams.optimizer = "Adafactor"
+  hparams.learning_rate_schedule = "rsqrt_decay"
+  hparams.learning_rate_warmup_steps = 6000
   hparams.layer_prepostprocess_dropout = 0.1
   return hparams
 
@@ -1095,7 +1116,10 @@ def imagetransformer_b12l_4h_b128_uncond_dr03_tpu():
   hparams.filter_size = 2048
   hparams.layer_preprocess_sequence = "none"
   hparams.layer_postprocess_sequence = "dan"
-  hparams.layer_prepostprocess_dropout = 0.3
+  hparams.layer_prepostprocess_dropout = 0.1
+  hparams.optimizer = "Adafactor"
+  hparams.learning_rate_schedule = "rsqrt_decay"
+  hparams.learning_rate_warmup_steps = 10000
   return hparams
 
 

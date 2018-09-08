@@ -23,7 +23,7 @@ from __future__ import print_function
 
 from tensor2tensor.layers import common_layers
 from tensor2tensor.rl.envs import in_graph_batch_env
-from tensor2tensor.rl.envs.utils import get_action_space
+from tensor2tensor.rl.envs import utils
 from tensor2tensor.utils import registry
 from tensor2tensor.utils import trainer_lib
 
@@ -39,20 +39,25 @@ FLAGS = flags.FLAGS
 class HistoryBuffer(object):
   """History Buffer."""
 
-  def __init__(self, input_dataset, length):
-    self.input_data_iterator = (
-        input_dataset.batch(length).make_initializable_iterator())
+  def __init__(self, input_dataset, length, observ_dtype, start_frame=None):
+    if start_frame is None:
+      dataset = input_dataset.batch(length)
+    else:
+      dataset = input_dataset.batch(length - 1)
+      dataset = dataset.map(lambda x: tf.concat([start_frame, x], axis=0))
+    self.input_data_iterator = dataset.make_initializable_iterator()
     self.length = length
+    self._observ_dtype = observ_dtype
     initial_frames = self.get_initial_observations()
     initial_shape = [length] + common_layers.shape_list(initial_frames)[1:]
-    self._history_buff = tf.Variable(tf.zeros(initial_shape, tf.float32),
+    self._history_buff = tf.Variable(tf.zeros(initial_shape, observ_dtype),
                                      trainable=False)
 
   def initialize(self, sess):
     sess.run(self.input_data_iterator.initializer)
 
   def get_initial_observations(self):
-    return tf.cast(self.input_data_iterator.get_next(), tf.float32)
+    return tf.cast(self.input_data_iterator.get_next(), self._observ_dtype)
 
   def get_all_elements(self):
     return self._history_buff.read_value()
@@ -100,8 +105,16 @@ class SimulatedBatchEnv(in_graph_batch_env.InGraphBatchEnv):
   def __init__(self, environment_spec, length):
     """Batch of environments inside the TensorFlow graph."""
 
-    self.length = length
+    observ_space = utils.get_observation_space(environment_spec)
     initial_frames_problem = environment_spec.initial_frames_problem
+    observ_shape = (initial_frames_problem.frame_height,
+                    initial_frames_problem.frame_width,
+                    initial_frames_problem.num_channels)
+    observ_space.shape = observ_shape
+    action_space = utils.get_action_space(environment_spec)
+    super(SimulatedBatchEnv, self).__init__(observ_space, action_space)
+
+    self.length = length
     self._min_reward = initial_frames_problem.min_reward
     self._num_frames = environment_spec.video_num_input_frames
     self._intrinsic_reward_scale = environment_spec.intrinsic_reward_scale
@@ -112,33 +125,36 @@ class SimulatedBatchEnv(in_graph_batch_env.InGraphBatchEnv):
     self._model = registry.model(FLAGS.model)(
         model_hparams, tf.estimator.ModeKeys.PREDICT)
 
-    _, self.action_shape, self.action_dtype = get_action_space(environment_spec)
-
     hparams = HParams(video_num_input_frames=
                       environment_spec.video_num_input_frames,
                       video_num_target_frames=
                       environment_spec.video_num_target_frames,
                       environment_spec=environment_spec)
 
+    initial_frames_dataset = initial_frames_problem.dataset(
+        tf.estimator.ModeKeys.TRAIN, FLAGS.data_dir, shuffle_files=False,
+        hparams=hparams).take(1)
+    start_frame = None
     if environment_spec.simulation_random_starts:
       dataset = initial_frames_problem.dataset(tf.estimator.ModeKeys.TRAIN,
                                                FLAGS.data_dir,
                                                shuffle_files=True,
                                                hparams=hparams)
-      dataset = dataset.shuffle(buffer_size=100)
+      dataset = dataset.shuffle(buffer_size=1000)
+      if environment_spec.simulation_flip_first_random_for_beginning:
+        # Later flip the first random frame in PPO batch for the true beginning.
+        start = initial_frames_dataset.make_one_shot_iterator().get_next()
+        start_frame = tf.expand_dims(start["inputs"], axis=0)
     else:
-      dataset = initial_frames_problem.dataset(tf.estimator.ModeKeys.TRAIN,
-                                               FLAGS.data_dir,
-                                               shuffle_files=False,
-                                               hparams=hparams).take(1)
+      dataset = initial_frames_dataset
 
     dataset = dataset.map(lambda x: x["inputs"]).repeat()
-    self.history_buffer = HistoryBuffer(dataset, self.length)
+    self.history_buffer = HistoryBuffer(
+        dataset, self.length, self.observ_dtype, start_frame=start_frame)
 
-    shape = (self.length, initial_frames_problem.frame_height,
-             initial_frames_problem.frame_width,
-             initial_frames_problem.num_channels)
-    self._observ = tf.Variable(tf.zeros(shape, tf.float32), trainable=False)
+    self._observ = tf.Variable(
+        tf.zeros((len(self),) + observ_shape, self.observ_dtype),
+        trainable=False)
 
   def initialize(self, sess):
     self.history_buffer.initialize(sess)
@@ -153,10 +169,15 @@ class SimulatedBatchEnv(in_graph_batch_env.InGraphBatchEnv):
                           axis=1)
       history = self.history_buffer.get_all_elements()
       with tf.variable_scope(tf.get_variable_scope(), reuse=tf.AUTO_REUSE):
+        # We only need 1 target frame here, set it.
+        hparams_target_frames = self._model.hparams.video_num_target_frames
+        self._model.hparams.video_num_target_frames = 1
         model_output = self._model.infer(
             {"inputs": history, "input_action": actions})
+        self._model.hparams.video_num_target_frames = hparams_target_frames
 
-      observ = tf.to_float(tf.squeeze(model_output["targets"], axis=1))
+      observ = tf.cast(tf.squeeze(model_output["targets"], axis=1),
+                       self.observ_dtype)
 
       reward = tf.to_float(model_output["target_reward"])
       reward = tf.reshape(reward, shape=(self.length,)) + self._min_reward
@@ -204,3 +225,7 @@ class SimulatedBatchEnv(in_graph_batch_env.InGraphBatchEnv):
   def observ(self):
     """Access the variable holding the current observation."""
     return self._observ.read_value()
+
+  @property
+  def history_observations(self):
+    return self.history_buffer.get_all_elements()
