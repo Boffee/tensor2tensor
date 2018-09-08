@@ -22,6 +22,7 @@ import base64
 import functools
 from googleapiclient import discovery
 import grpc
+import numpy as np
 
 from tensor2tensor import problems as problems_lib  # pylint: disable=unused-import
 from tensor2tensor.data_generators import text_encoder
@@ -77,6 +78,7 @@ def _make_example(input_ids, problem, input_feature_name="inputs"):
     tf.logging.info("Adding dummy value for feature %s as it is required by "
                     "the Problem.", fname)
     features[fname] = value
+      
   return tf.train.Example(features=tf.train.Features(feature=features))
 
 
@@ -160,4 +162,44 @@ def predict(inputs_list, problem, request_fn):
        prediction["scores"])
       for prediction in predictions
   ]
+  return outputs
+
+
+def _make_features_example(features, problem, input_feature_name="inputs"):
+  example_features = {
+      feature_name:
+      tf.train.Feature(int64_list=tf.train.Int64List(value=feature_value))
+      for feature_name, feature_value in features.items()
+  }
+  return tf.train.Example(features=tf.train.Features(feature=example_features))
+
+
+def predict_features(inputs_list, problem, request_fn):
+  """Encodes inputs, makes request to deployed TF model, and decodes outputs."""
+  assert isinstance(inputs_list, list)
+  features_list = []
+  for inputs in inputs_list:
+    features_list.append({
+        fname: _encode(fval,
+                       problem.feature_info[fname].encoder,
+                       add_eos=problem.has_inputs)
+        for fname, fval in inputs.items()
+    })
+
+  examples = [_make_features_example(features, problem)
+              for features in features_list]
+  predictions = request_fn(examples)
+  output_decoder = problem.feature_info["targets"].encoder
+  if problem.multi_target:
+    outputs = [
+        ([_decode(output, output_decoder) for output in prediction["outputs"]],
+         prediction["scores"])
+        for prediction in predictions
+    ]
+  else:
+    outputs = [
+        (_decode(prediction["outputs"], output_decoder),
+        prediction["scores"])
+        for prediction in predictions
+    ]
   return outputs

@@ -1924,6 +1924,31 @@ def transformer_big_enfr():
 
 
 @registry.register_hparams
+def transformer_med_enfr():
+  hparams = transformer_small()
+  hparams.shared_embedding_and_softmax_weights = False
+  hparams.num_hidden_layers = 3
+  hparams.layer_prepostprocess_dropout = 0.1
+  return hparams
+
+
+@registry.register_hparams
+def transformer_small_enfr():
+  hparams = transformer_small()
+  hparams.shared_embedding_and_softmax_weights = False
+  hparams.layer_prepostprocess_dropout = 0.1
+  return hparams
+
+
+@registry.register_hparams
+def transformer_tiny_enfr():
+  hparams = transformer_tiny()
+  hparams.shared_embedding_and_softmax_weights = False
+  hparams.layer_prepostprocess_dropout = 0.1
+  return hparams
+
+
+@registry.register_hparams
 def transformer_big_enfr_tpu():
   hparams = transformer_big_enfr()
   # For performance, use fewer heads so that matrix dimensions are at least 128
