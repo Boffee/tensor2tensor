@@ -1660,7 +1660,7 @@ def transformer_ada_lmpackedbase_relative():
 
 
 @registry.register_hparams
-def transformer_base():
+def transformer_base_v3():
   """Base parameters for Transformer model."""
   # Update parameters here, then occasionally cut a versioned set, e.g.
   # transformer_base_v2.
@@ -1675,6 +1675,13 @@ def transformer_base():
 
 
 @registry.register_hparams
+def transformer_base():
+  """Base parameters for Transformer model."""
+  hparams = transformer_base_v3()
+  return hparams
+
+
+@registry.register_hparams
 def transformer_big():
   """HParams for transformer big model on WMT."""
   hparams = transformer_base()
@@ -1682,6 +1689,32 @@ def transformer_big():
   hparams.filter_size = 4096
   hparams.num_heads = 16
   hparams.layer_prepostprocess_dropout = 0.3
+  return hparams
+
+
+@registry.register_hparams
+def transformer_tall():
+  """Hparams for transformer on LM+MNLI."""
+  hparams = transformer_base()
+  hparams.batch_size = 2048
+  hparams.hidden_size = 768
+  hparams.filter_size = 3072
+  hparams.num_hidden_layers = 12
+  hparams.num_heads = 12
+  hparams.learning_rate_schedule = (
+      "constant*linear_warmup*rsqrt_hidden_size")
+  hparams.learning_rate_constant = 2e-3
+  hparams.label_smoothing = 0.0
+  hparams.max_length = 512
+  hparams.eval_drop_long_sequences = True
+  return hparams
+
+
+@registry.register_hparams
+def transformer_tall_big():
+  """Hparams for transformer on LM+MNLI."""
+  hparams = transformer_tall()
+  hparams.num_hidden_layers = 18
   return hparams
 
 
@@ -2051,6 +2084,22 @@ def transformer_timeseries():
   hparams = transformer_small()
   hparams.batch_size = 256
   hparams.learning_rate_warmup_steps = 2000
+  return hparams
+
+
+@registry.register_hparams
+def transformer_mlperf_tpu():
+  """HParams for Transformer model on TPU for MLPerf on TPU 2x2."""
+  hparams = transformer_base_v3()
+  hparams.symbol_modality_num_shards = 1
+  hparams.max_length = 256  # ignored when using "_packed" problems
+  hparams.batch_size = 2048  # per-chip batch size matches the reference model
+  hparams.hidden_size = 1024
+  hparams.filter_size = 4096
+  hparams.num_heads = 16
+  hparams.attention_dropout_broadcast_dims = "0,1"  # batch, heads
+  hparams.relu_dropout_broadcast_dims = "1"  # length
+  hparams.layer_prepostprocess_dropout_broadcast_dims = "1"  # length
   return hparams
 
 

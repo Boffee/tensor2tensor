@@ -136,7 +136,7 @@ class Shape(object):
   @property
   def cumprod(self):
     """Cumulative product (exclusive) of Dimension sizes."""
-    return _cumprod(self.to_integer_list)[::-1]
+    return _cumprod(self.to_integer_list)[:-1]
 
   def cumprod_to_tensor_axis(self, cumprod):
     """Tensor axis i such that self.cumprod[i] == cumprod, or None."""
@@ -2815,6 +2815,10 @@ class ReshapeOperation(Operation):
 
 def reshape(x, new_shape):
   return ReshapeOperation(x, convert_to_shape(new_shape)).outputs[0]
+
+
+def transpose(x, new_shape):
+  return einsum([x], output_shape=convert_to_shape(new_shape))
 
 
 def rename_dimension(x, old_name, new_name):

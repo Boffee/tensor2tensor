@@ -46,7 +46,8 @@ def batch_env_factory(hparams, xvfb=False):
   if environment_spec.simulated_env:
     # TODO(piotrmilos): Consider passing only relevant parameters
     cur_batch_env = _define_simulated_batch_env(
-        environment_spec, hparams.num_agents)
+        environment_spec, hparams.num_agents,
+        hparams.initial_frame_chooser)
   else:
     cur_batch_env = _define_batch_env(hparams.environment_spec,
                                       hparams.num_agents,
@@ -66,9 +67,11 @@ def _define_batch_env(environment_spec, num_agents, xvfb=False):
     return env
 
 
-def _define_simulated_batch_env(environment_spec, num_agents):
-  cur_batch_env = simulated_batch_env.SimulatedBatchEnv(environment_spec,
-                                                        num_agents)
+def _define_simulated_batch_env(environment_spec, num_agents,
+                                initial_frame_chooser):
+  cur_batch_env = simulated_batch_env.SimulatedBatchEnv(
+      environment_spec, num_agents, initial_frame_chooser
+  )
   return cur_batch_env
 
 
@@ -99,6 +102,7 @@ class ExternalProcessEnv(object):
       observation_space: The cached observation space of the environment.
       action_space: The cached action space of the environment.
     """
+    self._constructor = constructor
     self._conn, conn = multiprocessing.Pipe()
     if xvfb:
       server_id = random.randint(10000, 99999)
@@ -128,6 +132,9 @@ class ExternalProcessEnv(object):
     self._process.start()
     self._observ_space = None
     self._action_space = None
+
+  def __str__(self):
+    return "ExternalProcessEnv(%s)" % str(self._constructor)
 
   @property
   def observation_space(self):

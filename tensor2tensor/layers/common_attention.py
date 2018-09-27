@@ -42,7 +42,7 @@ BatchInfo = collections.namedtuple("BatchInfo", "coordinates, order")
 _expert_count = 0
 
 
-def get_standardized_layers(hparams, dp=None, ps_devices=None):
+def get_standardized_layers(hparams, dp=None):
   """Get the common attention and feed-forward layers.
 
   The returned layer functions will have the following signature:
@@ -57,7 +57,6 @@ def get_standardized_layers(hparams, dp=None, ps_devices=None):
     hparams (tf.HParams): the model hparameters
     dp (expert_utils.Parallelism): A data parallelism object. If not given,
       the dp calls are simply ignored.
-    ps_devices: a reference to model._ps_devices (only used by the MOE layer)
 
   Returns:
     dict[str:fct]: A dictionary containing the standardized functions
@@ -119,14 +118,6 @@ def get_standardized_layers(hparams, dp=None, ps_devices=None):
 
   total_key_depth = hparams.attention_key_channels or hparams.hidden_size
   total_value_depth = hparams.attention_value_channels or hparams.hidden_size
-  is_train = hparams.mode == tf.estimator.ModeKeys.TRAIN
-
-  moe_hidden_sizes = [int(s) for s in hparams.moe_hidden_sizes.split(",")]
-  # Use filter size if moe_hidden_sizes was not given
-  if not moe_hidden_sizes:
-    moe_hidden_sizes = [hparams.filter_size]
-  expert_fn = expert_utils.ffn_expert_fn(hparams.hidden_size, moe_hidden_sizes,
-                                         hparams.hidden_size)
 
   # Attention layers:
 
@@ -217,24 +208,6 @@ def get_standardized_layers(hparams, dp=None, ps_devices=None):
 
   # Feed-forwards layers:
 
-  # === Mixture of expert layer ===
-  distributed_moe = register_layer(
-      expert_utils.distributed_moe,
-      default_args=[
-          dp,
-          ps_devices,
-      ],
-      default_kwargs=dict(
-          train=is_train,
-          input_size=hparams.hidden_size,
-          expert_fn=expert_fn,
-          num_experts=hparams.moe_num_experts,
-          k=hparams.moe_k,
-          loss_coef=hparams.moe_loss_coef,
-      ),
-      use_dp=False,
-  )
-
   # === FC layer ===
   conv_hidden_relu = register_layer(
       common_layers.conv_hidden_relu,
@@ -276,7 +249,6 @@ def get_standardized_layers(hparams, dp=None, ps_devices=None):
       fc=conv_hidden_relu,  # Fully connected
       sep=sep_conv_relu,  # Separable convolution (unmasked)
       sepm=sep_conv_relu_masked,  # Separable convolution (masked)
-      moe=distributed_moe,  # Mixture of expert layer
   )
   return layers
 
@@ -424,7 +396,7 @@ def get_timing_signal_1d(length,
   num_timescales = channels // 2
   log_timescale_increment = (
       math.log(float(max_timescale) / float(min_timescale)) /
-      (tf.to_float(num_timescales) - 1))
+      tf.maximum(tf.to_float(num_timescales) - 1, 1))
   inv_timescales = min_timescale * tf.exp(
       tf.to_float(tf.range(num_timescales)) * -log_timescale_increment)
   scaled_time = tf.expand_dims(position, 1) * tf.expand_dims(inv_timescales, 0)
@@ -3333,7 +3305,7 @@ def multihead_attention(query_antecedent,
     bias: bias Tensor (see attention_bias())
     total_key_depth: an integer
     total_value_depth: an integer
-    output_depth: an integerg
+    output_depth: an integer
     num_heads: an integer dividing total_key_depth and total_value_depth
     dropout_rate: a floating point number
     attention_type: a string, either "dot_product", "dot_product_relative",
@@ -4675,8 +4647,7 @@ def multihead_self_attention_memory_efficient(x,
 
   def forward_internal(x, wqkv, wo, attention_bias, norm_scale, norm_bias):
     """Forward function."""
-    n = common_layers.layer_norm_compute_python(x, epsilon, norm_scale,
-                                                norm_bias)
+    n = common_layers.layer_norm_compute(x, epsilon, norm_scale, norm_bias)
     wqkv_split = tf.unstack(wqkv, num=num_heads)
     wo_split = tf.unstack(wo, num=num_heads)
     y = 0
@@ -4700,8 +4671,7 @@ def multihead_self_attention_memory_efficient(x,
     def grad_fn(x, wqkv, wo, attention_bias, norm_scale, norm_bias, dy):
       """Custom gradient function."""
       with tf.control_dependencies([dy]):
-        n = common_layers.layer_norm_compute_python(x, epsilon, norm_scale,
-                                                    norm_bias)
+        n = common_layers.layer_norm_compute(x, epsilon, norm_scale, norm_bias)
         wqkv_split = tf.unstack(wqkv, num=num_heads)
         wo_split = tf.unstack(wo, num=num_heads)
         deps = []

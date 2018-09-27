@@ -43,7 +43,7 @@ def glow_hparams():
   hparams.batch_size = 32
   # can be prev_level, prev_step or normal.
   # see: glow_ops.merge_level_and_latent_dist
-  hparams.add_hparam("level_prior_scale", "prev_level")
+  hparams.add_hparam("level_scale", "prev_level")
   hparams.add_hparam("n_levels", 3)
   hparams.add_hparam("n_bits_x", 8)
   hparams.add_hparam("depth", 32)
@@ -99,7 +99,7 @@ class Glow(t2t_model.T2TModel):
     var_scope = tf.variable_scope("glow/body", reuse=True)
     # If eps=None, images are sampled from the prior.
     with arg_scope(ops, init=False), var_scope:
-      predictions, _ = glow_ops.encoder_decoder(
+      predictions, _, _ = glow_ops.encoder_decoder(
           "codec", self.z_sample, self.hparams, eps=None, reverse=True)
 
     return self.scale(predictions)

@@ -61,6 +61,9 @@ class _MemoryWrapper(WrapperBase):
     self._observ = tf.Variable(tf.zeros(observs_shape, self.observ_dtype),
                                trainable=False)
 
+  def __str__(self):
+    return "MemoryWrapper(%s)" % str(self._batch_env)
+
   def simulate(self, action):
 
     # There is subtlety here. We need to collect data
@@ -114,6 +117,8 @@ def define_collect(hparams, scope, eval_phase,
     rollout_metadata = None
     speculum = None
     for w in wrappers:
+      tf.logging.info("Applying wrapper %s(%s) to env %s."
+                      % (str(w[0]), str(w[1]), str(batch_env)))
       batch_env = w[0](batch_env, **w[1])
       to_initialize.append(batch_env)
       if w[0] == _MemoryWrapper:
@@ -261,6 +266,30 @@ def define_collect(hparams, scope, eval_phase,
   printing = tf.Print(0, [mean_score, scores_sum, scores_num], "mean_score: ")
   with tf.control_dependencies([index, printing]):
     memory = [mem.read_value() for mem in memory]
+    # When generating real data together with PPO training we must use single
+    # agent. For PPO to work we reshape the history, as if it was generated
+    # by real_ppo_effective_num_agents.
+    if getattr(hparams, "effective_num_agents", None):
+      new_memory = []
+      effective_num_agents = hparams.effective_num_agents
+      assert hparams.epoch_length % effective_num_agents == 0, (
+          "The rollout of hparams.epoch_length will be distributed amongst"
+          "effective_num_agents of agents")
+      new_epoch_length = int(hparams.epoch_length / effective_num_agents)
+      for mem, info in zip(memory, rollout_metadata):
+        shape, _, name = info
+        new_shape = [effective_num_agents, new_epoch_length] + shape[1:]
+        perm = list(range(len(shape)+1))
+        perm[0] = 1
+        perm[1] = 0
+        mem = tf.transpose(mem, perm=perm)
+        mem = tf.reshape(mem, shape=new_shape)
+        mem = tf.transpose(mem, perm=perm,
+                           name="collect_memory_%d_%s"
+                           % (new_epoch_length, name))
+        new_memory.append(mem)
+      memory = new_memory
+
     mean_score_summary = tf.cond(
         tf.greater(scores_num, 0),
         lambda: tf.summary.scalar("mean_score_this_iter", mean_score),

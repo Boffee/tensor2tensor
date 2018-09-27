@@ -23,6 +23,7 @@ import numpy as np
 import six
 
 from tensor2tensor.data_generators import generator_utils
+from tensor2tensor.data_generators import image_utils
 from tensor2tensor.data_generators import problem
 from tensor2tensor.data_generators import text_encoder
 from tensor2tensor.layers import common_video
@@ -37,14 +38,16 @@ def resize_video_frames(images, size):
   resized_images = []
   for image in images:
     resized_images.append(
-        tf.to_int64(tf.image.resize_images(
-            image, [size, size], tf.image.ResizeMethod.BILINEAR)))
+        tf.to_int64(
+            tf.image.resize_images(image, [size, size],
+                                   tf.image.ResizeMethod.BILINEAR)))
   return resized_images
 
 
 def display_video_hooks(hook_args):
   """Hooks to display videos at decode time."""
   predictions = hook_args.predictions
+  fps = hook_args.decode_hparams.frames_per_second
 
   all_summaries = []
   for decode_ind, decode in enumerate(predictions):
@@ -56,16 +59,36 @@ def display_video_hooks(hook_args):
     output_videos = np.asarray(output_videos, dtype=np.uint8)
     input_videos = np.asarray(input_videos, dtype=np.uint8)
 
-    input_videos = np.concatenate((input_videos, target_videos), axis=1)
-    output_videos = np.concatenate((input_videos, output_videos), axis=1)
+    # Video gif.
+    all_input = np.concatenate((input_videos, target_videos), axis=1)
+    all_output = np.concatenate((input_videos, output_videos), axis=1)
     input_summ_vals, _ = common_video.py_gif_summary(
-        "decode_%d/input" % decode_ind, input_videos, max_outputs=10, fps=10,
+        "decode_%d/input" % decode_ind,
+        all_input, max_outputs=10,
+        fps=fps,
         return_summary_value=True)
     output_summ_vals, _ = common_video.py_gif_summary(
-        "decode_%d/output" % decode_ind, output_videos, max_outputs=10, fps=10,
+        "decode_%d/output" % decode_ind,
+        all_output,
+        max_outputs=10,
+        fps=fps,
         return_summary_value=True)
     all_summaries.extend(input_summ_vals)
     all_summaries.extend(output_summ_vals)
+
+    # Frame-by-frame summaries
+    iterable = zip(all_input[:10], all_output[:10])
+    for ind, (input_video, output_video) in enumerate(iterable):
+      t, h, w, c = input_video.shape
+      # Tile vertically
+      input_frames = np.reshape(input_video, (t*h, w, c))
+      output_frames = np.reshape(output_video, (t*h, w, c))
+
+      # Concat across width.
+      all_frames = np.concatenate((input_frames, output_frames), axis=1)
+      frame_by_frame_summ = image_utils.image_to_tf_summary_value(
+          all_frames, tag="input/output/decode_%d" % ind)
+      all_summaries.append(frame_by_frame_summ)
   return all_summaries
 
 
@@ -87,8 +110,8 @@ def summarize_video_metrics(hook_args):
           predictions)
     else:
       metrics_results, _ = video_metrics.compute_video_metrics_from_png_files(
-          output_dirs, problem_name,
-          hparams.video_num_target_frames, frame_shape)
+          output_dirs, problem_name, hparams.video_num_target_frames,
+          frame_shape)
 
   summary_values = []
   for name, array in six.iteritems(metrics_results):
@@ -106,6 +129,10 @@ class VideoProblem(problem.Problem):
     # Path to a directory to dump generated frames as png for debugging.
     # If empty, no debug frames will be generated.
     self.debug_dump_frames_path = ""
+    # Whether to skip random inputs at the beginning or not.
+    self.settable_random_skip = True
+    self.settable_use_not_breaking_batching = True
+    self.shuffle = True
 
   @property
   def num_channels(self):
@@ -171,8 +198,7 @@ class VideoProblem(problem.Problem):
     """Runtime preprocessing, e.g., resize example["frame"]."""
     if getattr(hparams, "preprocess_resize_frames", None) is not None:
       example["frame"] = tf.image.resize_images(
-          example["frame"],
-          hparams.preprocess_resize_frames,
+          example["frame"], hparams.preprocess_resize_frames,
           tf.image.ResizeMethod.BILINEAR)
     return example
 
@@ -234,7 +260,7 @@ class VideoProblem(problem.Problem):
         receiver_tensors=video_input_frames)
 
   def preprocess(self, dataset, mode, hparams, interleave=True):
-    del interleave
+
     def split_on_batch(x):
       """Split x on batch dimension into x[:size, ...] and x[size:, ...]."""
       length = len(x.get_shape())
@@ -293,6 +319,7 @@ class VideoProblem(problem.Problem):
         batched not-broken videos.
 
       """
+
       def check_integrity_and_batch(*datasets):
         """Checks whether a sequence of frames are from the same video.
 
@@ -306,11 +333,11 @@ class VideoProblem(problem.Problem):
         if "frame_number" in datasets[0]:
           frame_numbers = [dataset["frame_number"][0] for dataset in datasets]
 
-          not_broken = tf.equal(
-              frame_numbers[-1] - frame_numbers[0], num_frames-1)
+          not_broken = tf.equal(frame_numbers[-1] - frame_numbers[0],
+                                num_frames - 1)
           if self.only_keep_videos_from_0th_frame:
-            not_broken = tf.logical_and(not_broken,
-                                        tf.equal(frame_numbers[0], 0))
+            not_broken = tf.logical_and(not_broken, tf.equal(
+                frame_numbers[0], 0))
         else:
           tf.logging.warning("use_not_breaking_batching is True but "
                              "no frame_number is in the dataset.")
@@ -331,33 +358,36 @@ class VideoProblem(problem.Problem):
       return dataset
 
     preprocessed_dataset = dataset.map(_preprocess)
-    num_frames = (hparams.video_num_input_frames +
-                  hparams.video_num_target_frames)
+    num_frames = (
+        hparams.video_num_input_frames + hparams.video_num_target_frames)
     # We jump by a random position at the beginning to add variety.
-    if self.random_skip:
+    if (self.random_skip and self.settable_random_skip and interleave and
+        mode == tf.estimator.ModeKeys.TRAIN):
       random_skip = tf.random_uniform([], maxval=num_frames, dtype=tf.int64)
       preprocessed_dataset = preprocessed_dataset.skip(random_skip)
-    if self.use_not_breaking_batching:
+    if (self.use_not_breaking_batching and
+        self.settable_use_not_breaking_batching):
       batch_dataset = avoid_break_batching(preprocessed_dataset)
     else:
       batch_dataset = preprocessed_dataset.apply(
           tf.contrib.data.batch_and_drop_remainder(num_frames))
     dataset = batch_dataset.map(features_from_batch)
-    dataset = dataset.shuffle(hparams.get("shuffle_buffer_size", 128))
+    if self.shuffle and interleave and mode == tf.estimator.ModeKeys.TRAIN:
+      dataset = dataset.shuffle(hparams.get("shuffle_buffer_size", 128))
     return dataset
 
   def eval_metrics(self):
     eval_metrics = [
         metrics.Metrics.ACC, metrics.Metrics.ACC_PER_SEQ,
-        metrics.Metrics.NEG_LOG_PERPLEXITY, metrics.Metrics.IMAGE_SUMMARY]
+        metrics.Metrics.NEG_LOG_PERPLEXITY, metrics.Metrics.IMAGE_SUMMARY
+    ]
     return eval_metrics
 
   def validate_frame(self, frame):
     height, width, channels = frame.shape
     if channels != self.num_channels:
       raise ValueError("Generated frame has %d channels while the class "
-                       "assumes %d channels." % (channels,
-                                                 self.num_channels))
+                       "assumes %d channels." % (channels, self.num_channels))
     if height != self.frame_height:
       raise ValueError("Generated frame has height %d while the class "
                        "assumes height %d." % (height, self.frame_height))
@@ -373,8 +403,8 @@ class VideoProblem(problem.Problem):
         over user-supplied vocab files if there are extra fields needing them.
       tmp_dir: temporary directory that you can use for downloading and scratch.
       dataset_split: problem.DatasetSplit, which data split to generate samples
-        for (for example, training and evaluation). You can assume it's TRAIN
-        if self.
+        for (for example, training and evaluation). You can assume it's TRAIN if
+        self.
 
     Yields:
       Sample: dict<str feature_name, feature value>; we assume that there is
@@ -408,16 +438,15 @@ class VideoProblem(problem.Problem):
       writer = common_video.VideoWriter(fps=10, file_format="avi")
 
     with tf.Graph().as_default():
-      image_t = tf.placeholder(
-          dtype=tf.uint8, shape=(None, None, None))
+      image_t = tf.placeholder(dtype=tf.uint8, shape=(None, None, None))
       encoded_image_t = tf.image.encode_png(image_t)
       with tf.Session() as sess:
         for features in self.generate_samples(data_dir, tmp_dir, dataset_split):
           unencoded_frame = features.pop("frame")
           self.validate_frame(unencoded_frame)
           height, width, _ = unencoded_frame.shape
-          encoded_frame = sess.run(encoded_image_t, feed_dict={
-              image_t: unencoded_frame})
+          encoded_frame = sess.run(
+              encoded_image_t, feed_dict={image_t: unencoded_frame})
           features["image/encoded"] = [encoded_frame]
           features["image/format"] = ["png"]
           features["image/height"] = [height]
@@ -426,8 +455,8 @@ class VideoProblem(problem.Problem):
           has_debug_image = "image/debug" in features
           if has_debug_image:
             unencoded_debug = features.pop("image/debug")
-            encoded_debug = sess.run(encoded_image_t, feed_dict={
-                image_t: unencoded_debug})
+            encoded_debug = sess.run(
+                encoded_image_t, feed_dict={image_t: unencoded_debug})
             features["image/encoded_debug"] = [encoded_debug]
 
           if self.debug_dump_frames_path:
@@ -461,13 +490,13 @@ class VideoProblem(problem.Problem):
     if self.is_generate_per_split:
       for split, paths in split_paths:
         generator_utils.generate_files(
-            self.generate_encoded_samples(
-                data_dir, tmp_dir, split), paths,
+            self.generate_encoded_samples(data_dir, tmp_dir, split),
+            paths,
             cycle_every_n=self.total_number_of_frames // len(paths))
     else:
       generator_utils.generate_files(
-          self.generate_encoded_samples(
-              data_dir, tmp_dir, problem.DatasetSplit.TRAIN),
+          self.generate_encoded_samples(data_dir, tmp_dir,
+                                        problem.DatasetSplit.TRAIN),
           all_paths,
           cycle_every_n=self.total_number_of_frames // len(all_paths))
 

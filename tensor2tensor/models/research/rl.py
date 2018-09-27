@@ -53,7 +53,8 @@ def ppo_base_v1():
   hparams.add_hparam("simulation_random_starts", False)
   hparams.add_hparam("simulation_flip_first_random_for_beginning", False)
   hparams.add_hparam("intrinsic_reward_scale", 0.)
-  hparams.add_hparam("logits_clip", 0.)
+  hparams.add_hparam("logits_clip", 4.0)
+  hparams.add_hparam("dropout_ppo", 0.1)
   return hparams
 
 
@@ -107,7 +108,7 @@ def ppo_atari_base():
 def ppo_pong_base():
   """Pong base parameters."""
   hparams = ppo_discrete_action_base()
-  hparams.learning_rate = 2e-4
+  hparams.learning_rate = 1e-4
   hparams.num_agents = 8
   hparams.epoch_length = 200
   hparams.gae_gamma = 0.985
@@ -143,7 +144,7 @@ def simple_gym_spec(env):
 def ppo_pong_ae_base():
   """Pong autoencoder base parameters."""
   hparams = ppo_pong_base()
-  hparams.learning_rate = 2e-4
+  hparams.learning_rate = 1e-4
   hparams.network = dense_bitwise_categorical_fun
   return hparams
 
@@ -230,8 +231,8 @@ def feed_forward_cnn_small_categorical_fun(action_space, config, observations):
   """Small cnn network with categorical output."""
   obs_shape = common_layers.shape_list(observations)
   x = tf.reshape(observations, [-1] + obs_shape[2:])
-
   with tf.variable_scope("network_parameters"):
+    dropout = getattr(config, "dropout_ppo", 0.0)
     with tf.variable_scope("feed_forward_cnn_small"):
       x = tf.to_float(x) / 255.0
       x = tf.contrib.layers.conv2d(x, 32, [5, 5], [2, 2],
@@ -242,7 +243,7 @@ def feed_forward_cnn_small_categorical_fun(action_space, config, observations):
       flat_x = tf.reshape(
           x, [obs_shape[0], obs_shape[1],
               functools.reduce(operator.mul, x.shape.as_list()[1:], 1)])
-
+      flat_x = tf.nn.dropout(flat_x, keep_prob=1.0 - dropout)
       x = tf.contrib.layers.fully_connected(flat_x, 128, tf.nn.relu)
 
       logits = tf.contrib.layers.fully_connected(x, action_space.n,
@@ -251,6 +252,42 @@ def feed_forward_cnn_small_categorical_fun(action_space, config, observations):
 
       value = tf.contrib.layers.fully_connected(
           x, 1, activation_fn=None)[..., 0]
+      policy = tf.contrib.distributions.Categorical(logits=logits)
+  return NetworkOutput(policy, value, lambda a: a)
+
+
+def feed_forward_cnn_small_categorical_fun_new(
+    action_space, config, observations):
+  """Small cnn network with categorical output."""
+  obs_shape = common_layers.shape_list(observations)
+  x = tf.reshape(observations, [-1] + obs_shape[2:])
+  with tf.variable_scope("network_parameters"):
+    dropout = getattr(config, "dropout_ppo", 0.0)
+    with tf.variable_scope("feed_forward_cnn_small"):
+      x = tf.to_float(x) / 255.0
+      x = tf.nn.dropout(x, keep_prob=1.0 - dropout)
+      x = tf.layers.conv2d(
+          x, 32, (4, 4), strides=(2, 2), name="conv1",
+          activation=common_layers.belu, padding="SAME")
+      x = tf.nn.dropout(x, keep_prob=1.0 - dropout)
+      x = tf.layers.conv2d(
+          x, 64, (4, 4), strides=(2, 2), name="conv2",
+          activation=common_layers.belu, padding="SAME")
+      x = tf.nn.dropout(x, keep_prob=1.0 - dropout)
+      x = tf.layers.conv2d(
+          x, 128, (4, 4), strides=(2, 2), name="conv3",
+          activation=common_layers.belu, padding="SAME")
+
+      flat_x = tf.reshape(
+          x, [obs_shape[0], obs_shape[1],
+              functools.reduce(operator.mul, x.shape.as_list()[1:], 1)])
+      flat_x = tf.nn.dropout(flat_x, keep_prob=1.0 - dropout)
+      x = tf.layers.dense(flat_x, 128, activation=tf.nn.relu, name="dense1")
+
+      logits = tf.layers.dense(x, action_space.n, name="dense2")
+      logits = clip_logits(logits, config)
+
+      value = tf.layers.dense(x, 1, name="value")[..., 0]
       policy = tf.contrib.distributions.Categorical(logits=logits)
 
   return NetworkOutput(policy, value, lambda a: a)

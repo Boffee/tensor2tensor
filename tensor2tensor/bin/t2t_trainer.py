@@ -79,6 +79,9 @@ try:
 except:  # pylint: disable=bare-except
   pass
 
+flags.DEFINE_string("std_server_protocol", "grpc",
+                    "Protocol for tf.train.Server.")
+
 # Google Cloud TPUs
 flags.DEFINE_string("cloud_tpu_name", "%s-tpu" % os.getenv("USER"),
                     "Name of Cloud TPU instance to use or create.")
@@ -150,7 +153,7 @@ def create_hparams():
   return trainer_lib.create_hparams(FLAGS.hparams_set, FLAGS.hparams)
 
 
-def create_experiment_fn(**kwargs):
+def create_experiment_fn():
   return trainer_lib.create_experiment_fn(
       model_name=FLAGS.model,
       problem_name=FLAGS.problem,
@@ -167,8 +170,8 @@ def create_experiment_fn(**kwargs):
       eval_early_stopping_steps=FLAGS.eval_early_stopping_steps,
       eval_early_stopping_metric=FLAGS.eval_early_stopping_metric,
       eval_early_stopping_metric_delta=FLAGS.eval_early_stopping_metric_delta,
-      eval_early_stopping_metric_minimize=FLAGS.
-      eval_early_stopping_metric_minimize,
+      eval_early_stopping_metric_minimize=FLAGS
+      .eval_early_stopping_metric_minimize,
       use_tpu=FLAGS.use_tpu,
       use_tpu_estimator=FLAGS.use_tpu_estimator,
       use_xla=FLAGS.xla_compile,
@@ -176,14 +179,16 @@ def create_experiment_fn(**kwargs):
       decode_from_file=FLAGS.decode_from_file,
       decode_to_file=FLAGS.decode_to_file,
       decode_reference=FLAGS.decode_reference,
-      **kwargs)
+      std_server_protocol=FLAGS.std_server_protocol)
 
 
-def create_run_config(hp):
+def create_run_config(hp, output_dir=None):
   """Create a run config.
 
   Args:
     hp: model hyperparameters
+    output_dir: model's output directory, defaults to output_dir flag.
+
   Returns:
     a run config
   """
@@ -209,7 +214,7 @@ def create_run_config(hp):
       hp.activation_dtype == "float32" and
       hp.weight_dtype == "float32")
   return trainer_lib.create_run_config(
-      model_dir=os.path.expanduser(FLAGS.output_dir),
+      model_dir=output_dir or os.path.expanduser(FLAGS.output_dir),
       master=FLAGS.master,
       iterations_per_loop=FLAGS.iterations_per_loop,
       num_shards=FLAGS.tpu_num_shards,

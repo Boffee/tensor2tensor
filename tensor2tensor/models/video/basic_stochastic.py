@@ -72,27 +72,37 @@ class NextFrameBasicStochasticDiscrete(
 
     if hparams.mode == tf.estimator.ModeKeys.PREDICT:
       layer_shape = common_layers.shape_list(layer)
-      rand = tf.random_uniform(layer_shape[:-1] + [hparams.bottleneck_bits])
+      if hparams.full_latent_tower:
+        rand = tf.random_uniform(layer_shape[:-1] + [hparams.bottleneck_bits])
+      else:
+        rand = tf.random_uniform(layer_shape[:-3] + [
+            1, 1, hparams.bottleneck_bits])
       d = 2.0 * tf.to_float(tf.less(0.5, rand)) - 1.0
       z = tf.layers.dense(d, final_filters, name="unbottleneck")
       return layer + z, 0.0
 
     # Embed.
+    frames = tf.concat(
+        [features["cur_target_frame"], features["inputs"]], axis=-1)
     x = tf.layers.dense(
-        features["targets"], filters, name="latent_embed",
+        frames, filters, name="latent_embed",
         bias_initializer=tf.random_normal_initializer(stddev=0.01))
     x = common_attention.add_timing_signal_nd(x)
 
-    for i in range(hparams.num_compress_steps):
-      with tf.variable_scope("latent_downstride%d" % i):
-        x = common_layers.make_even_size(x)
-        if i < hparams.filter_double_steps:
-          filters *= 2
-        x = common_attention.add_timing_signal_nd(x)
-        x = tf.layers.conv2d(x, filters, kernel, activation=common_layers.belu,
-                             strides=(2, 2), padding="SAME")
-        x = common_layers.layer_norm(x)
-
+    if hparams.full_latent_tower:
+      for i in range(hparams.num_compress_steps):
+        with tf.variable_scope("latent_downstride%d" % i):
+          x = common_layers.make_even_size(x)
+          if i < hparams.filter_double_steps:
+            filters *= 2
+          x = common_attention.add_timing_signal_nd(x)
+          x = tf.layers.conv2d(x, filters, kernel,
+                               activation=common_layers.belu,
+                               strides=(2, 2), padding="SAME")
+          x = common_layers.layer_norm(x)
+    else:
+      x = common_layers.double_discriminator(x)
+      x = tf.expand_dims(tf.expand_dims(x, axis=1), axis=1)
     x = tf.tanh(tf.layers.dense(x, hparams.bottleneck_bits, name="bottleneck"))
     d = x + tf.stop_gradient(2.0 * tf.to_float(tf.less(0.0, x)) - 1.0 - x)
     if hparams.mode == tf.estimator.ModeKeys.TRAIN:
@@ -111,12 +121,35 @@ def next_frame_basic_stochastic():
   hparams.stochastic_model = True
   hparams.add_hparam("latent_channels", 1)
   hparams.add_hparam("latent_std_min", -5.0)
-  hparams.add_hparam("num_iterations_1st_stage", 25000)
-  hparams.add_hparam("num_iterations_2nd_stage", 25000)
+  hparams.add_hparam("num_iterations_1st_stage", 15000)
+  hparams.add_hparam("num_iterations_2nd_stage", 15000)
   hparams.add_hparam("latent_loss_multiplier", 1e-3)
+  hparams.add_hparam("latent_loss_multiplier_dynamic", False)
+  hparams.add_hparam("latent_loss_multiplier_alpha", 1e-5)
+  hparams.add_hparam("latent_loss_multiplier_epsilon", 1.0)
   hparams.add_hparam("latent_loss_multiplier_schedule", "constant")
   hparams.add_hparam("latent_num_frames", 0)  # 0 means use all frames.
-  hparams.add_hparam("anneal_end", 100000)
+  hparams.add_hparam("anneal_end", 50000)
+  hparams.add_hparam("information_capacity", 0.0)
+  return hparams
+
+
+@registry.register_hparams
+def next_frame_sampling_stochastic():
+  """Basic 2-frame conv model with stochastic tower."""
+  hparams = basic_deterministic_params.next_frame_sampling()
+  hparams.stochastic_model = True
+  hparams.add_hparam("latent_channels", 1)
+  hparams.add_hparam("latent_std_min", -5.0)
+  hparams.add_hparam("num_iterations_1st_stage", 15000)
+  hparams.add_hparam("num_iterations_2nd_stage", 15000)
+  hparams.add_hparam("latent_loss_multiplier", 1e-3)
+  hparams.add_hparam("latent_loss_multiplier_dynamic", False)
+  hparams.add_hparam("latent_loss_multiplier_alpha", 1e-5)
+  hparams.add_hparam("latent_loss_multiplier_epsilon", 1.0)
+  hparams.add_hparam("latent_loss_multiplier_schedule", "constant")
+  hparams.add_hparam("latent_num_frames", 0)  # 0 means use all frames.
+  hparams.add_hparam("anneal_end", 40000)
   hparams.add_hparam("information_capacity", 0.0)
   return hparams
 
@@ -124,9 +157,8 @@ def next_frame_basic_stochastic():
 @registry.register_hparams
 def next_frame_basic_stochastic_discrete():
   """Basic 2-frame conv model with stochastic discrete latent."""
-  hparams = basic_deterministic_params.next_frame_basic_deterministic()
-  hparams.num_compress_steps = 8
-  hparams.filter_double_steps = 3
-  hparams.add_hparam("bottleneck_bits", 32)
-  hparams.add_hparam("bottleneck_noise", 0.05)
+  hparams = basic_deterministic_params.next_frame_sampling()
+  hparams.add_hparam("bottleneck_bits", 16)
+  hparams.add_hparam("bottleneck_noise", 0.02)
+  hparams.add_hparam("full_latent_tower", False)
   return hparams

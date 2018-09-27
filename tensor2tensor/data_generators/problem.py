@@ -16,17 +16,21 @@
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
+
 import collections
+import copy
 import functools
 import multiprocessing
 import os
 import random
-
 import six
+
 from tensor2tensor.data_generators import generator_utils
 from tensor2tensor.data_generators import text_encoder
+from tensor2tensor.layers import modalities
 from tensor2tensor.utils import data_reader
 from tensor2tensor.utils import metrics
+
 import tensorflow as tf
 from tensorflow.contrib.tpu.python.tpu import tpu_config
 
@@ -485,6 +489,8 @@ class Problem(object):
 
   def get_hparams(self, model_hparams=None):
     """Returns problem_hparams."""
+    if model_hparams is None:
+      model_hparams = default_model_hparams()
     if self._hparams is not None:
       return self._hparams
 
@@ -507,6 +513,9 @@ class Problem(object):
       _reverse_problem_hparams(hp)
     if self._was_copy:
       _copy_problem_hparams(hp)
+
+    model_hparams = copy.copy(model_hparams)
+    _create_modalities(hp, model_hparams)
 
     self._hparams = hp
     return self._hparams
@@ -562,7 +571,8 @@ class Problem(object):
               shard=None,
               partition_id=0,
               num_partitions=1,
-              max_records=-1):
+              max_records=-1,
+              only_last=False):
     """Build a Dataset for this problem.
 
     Args:
@@ -584,6 +594,7 @@ class Problem(object):
       partition_id: integer - which partition of the dataset to read from
       num_partitions: how many partitions in the dataset
       max_records: int, number of records to truncate to.
+      only_last: bool, whether we should include only files from last epoch.
 
     Returns:
       Dataset containing dict<feature name, Tensor>.
@@ -608,9 +619,17 @@ class Problem(object):
     _ = self.get_hparams(hparams)
 
     data_filepattern = self.filepattern(data_dir, dataset_split, shard=shard)
+    if only_last:
+      imprv_data_filepattern = data_filepattern + r"10.[\d+]"
+    else:
+      imprv_data_filepattern = data_filepattern
     tf.logging.info("Reading data files from %s", data_filepattern)
-    data_files = sorted(tf.contrib.slim.parallel_reader.get_data_files(
-        data_filepattern))
+    try:
+      data_files = sorted(tf.contrib.slim.parallel_reader.get_data_files(
+          imprv_data_filepattern))
+    except ValueError:
+      data_files = sorted(tf.contrib.slim.parallel_reader.get_data_files(
+          data_filepattern))
 
     # Functions used in dataset transforms below. `filenames` can be either a
     # `tf.string` tensor or `tf.data.Dataset` containing one or more filenames.
@@ -714,15 +733,13 @@ class Problem(object):
 
     features = collections.defaultdict(FeatureInfo)
 
-    for name, mod_spec in six.iteritems(input_mods):
-      mod, vocab_size = mod_spec
+    for name, mod in six.iteritems(input_mods):
       finfo = features[name]
       finfo.modality = mod
-      finfo.vocab_size = vocab_size
+      finfo.vocab_size = mod.top_dimensionality
 
-    mod, vocab_size = target_mod
-    features["targets"].modality = mod
-    features["targets"].vocab_size = vocab_size
+    features["targets"].modality = target_mod
+    features["targets"].vocab_size = target_mod.top_dimensionality
 
     for name, encoder in six.iteritems(vocabs):
       features[name].encoder = encoder
@@ -1084,6 +1101,83 @@ def _reverse_problem_hparams(p_hparams):
 
   # Mark that p was reversed.
   p.was_reversed = True
+
+
+def _create_modalities(problem_hparams, hparams):
+  """Converts string-type modalities to their corresponding Modality.
+
+  Args:
+    problem_hparams: tf.contrib.training.HParams for the Problem. It must have
+      input_modality and target_modality as attributes. Modalities are either
+      tuples of type ("modality_type:modality_name", vocab_size), and they will
+      be converted to Modality objects; or they are already Modality objects,
+      and they remain the same.
+    hparams: tf.contrib.training.HParams for the model. It may have
+      input_modalities and target_modality, which will override
+      problem_hparams' modalities.
+
+  Returns:
+    None
+  """
+  input_modality_overrides = {}
+  if hasattr(hparams, "input_modalities"):
+    for override_str in hparams.input_modalities.split(";"):
+      if override_str != "default":
+        parts = override_str.split(":")
+        feature_name = parts[0]
+        modality_name = ":".join(parts[1:])
+        input_modality_overrides[feature_name] = modality_name
+
+  input_modality = {}
+  for feature_name, modality in six.iteritems(problem_hparams.input_modality):
+    if isinstance(modality, (list, tuple)):
+      if feature_name in input_modality_overrides:
+        _warn_changed_modality_type(input_modality_overrides[feature_name],
+                                    modality[0],
+                                    feature_name)
+        modality = (input_modality_overrides[feature_name], modality[1])
+      modality = modalities.create_modality(modality, hparams)
+    input_modality[feature_name] = modality
+  problem_hparams.input_modality = input_modality
+
+  target_modality_name = None
+  if (hasattr(hparams, "target_modality") and
+      hparams.target_modality != "default"):
+    target_modality_name = hparams.target_modality
+
+  if isinstance(problem_hparams.target_modality, dict):
+    target_modality = {}
+    for feature_name, modality in six.iteritems(
+        problem_hparams.target_modality):
+      if isinstance(modality, (list, tuple)):
+        # TODO(lukaszkaiser): allow overriding other target modalities.
+        if target_modality_name and feature_name == "targets":
+          _warn_changed_modality_type(target_modality_name,
+                                      modality[0],
+                                      "target_modality/%s" % feature_name)
+          modality = (target_modality_name, modality[1])
+        modality = modalities.create_modality(modality, hparams)
+      target_modality[feature_name] = modality
+    problem_hparams.target_modality = target_modality
+  elif isinstance(problem_hparams.target_modality, (list, tuple)):
+    modality = problem_hparams.target_modality
+    if target_modality_name:
+      _warn_changed_modality_type(target_modality_name,
+                                  modality[0],
+                                  "target")
+      modality = (target_modality_name, modality[1])
+    modality = modalities.create_modality(modality, hparams)
+    problem_hparams.target_modality = modality
+
+
+def _warn_changed_modality_type(new_name, old_name, feature_name):
+  new_type, new_name = modalities.parse_modality_name(new_name)
+  old_type, old_name = modalities.parse_modality_name(old_name)
+  if new_type != old_type:
+    tf.logging.warn(
+        "%s has a designated modality type %s (%s) but has been "
+        "overridden with a modality of type %s (%s).", feature_name, old_type,
+        old_name, new_type, new_name)
 
 
 def _default_hparams():
