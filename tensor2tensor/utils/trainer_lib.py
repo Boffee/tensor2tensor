@@ -244,13 +244,16 @@ def create_estimator(model_name,
     predict_batch_size = batch_size
     if decode_hparams and decode_hparams.batch_size:
       predict_batch_size = decode_hparams.batch_size
+    eval_batch_size = batch_size
+    if hparams.eval_batch_size:
+      eval_batch_size = hparams.eval_batch_size
     estimator = tf.contrib.tpu.TPUEstimator(
         model_fn=model_fn,
         model_dir=run_config.model_dir,
         config=run_config,
         use_tpu=use_tpu,
         train_batch_size=batch_size,
-        eval_batch_size=predict_batch_size if "eval" in schedule else None,
+        eval_batch_size=eval_batch_size if "eval" in schedule else None,
         predict_batch_size=predict_batch_size)
   else:
     estimator = tf.estimator.Estimator(

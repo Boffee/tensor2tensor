@@ -834,6 +834,10 @@ class Problem(object):
     Returns:
       (features_dict<str name, Tensor feature>, Tensor targets)
     """
+    if mode == tf.estimator.ModeKeys.EVAL:
+      hparams = copy.copy(hparams)
+      hparams.batch_size = hparams.eval_batch_size or hparams.batch_size
+
     partition_id, num_partitions = self._dataset_partition(mode, config)
 
     is_training = mode == tf.estimator.ModeKeys.TRAIN

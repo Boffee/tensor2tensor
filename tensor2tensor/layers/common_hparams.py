@@ -32,6 +32,8 @@ def basic_params1():
       # of tokens per batch per GPU or per TPU core.  Otherwise, this is
       # the number of examples per GPU or per TPU core.
       batch_size=4096,
+      # Set to batch_size if 0.
+      eval_batch_size=0,
       # If True, then if the features are of variable length, the batch_size is
       # used as the actual batch size (and not tokens per batch).
       use_fixed_batch_size=False,
