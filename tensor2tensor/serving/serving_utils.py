@@ -174,7 +174,7 @@ def _make_features_example(features, problem, input_feature_name="inputs"):
   return tf.train.Example(features=tf.train.Features(feature=example_features))
 
 
-def predict_features(inputs_list, problem, request_fn):
+def predict_features(inputs_list, problem, request_fn, return_predictions=False):
   """Encodes inputs, makes request to deployed TF model, and decodes outputs."""
   assert isinstance(inputs_list, list)
   features_list = []
@@ -202,4 +202,8 @@ def predict_features(inputs_list, problem, request_fn):
         prediction["scores"])
         for prediction in predictions
     ]
-  return outputs
+  
+  if return_predictions:
+    return outputs, predictions
+  else:
+    return outputs
