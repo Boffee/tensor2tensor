@@ -1957,6 +1957,14 @@ def transformer_big_enfr():
 
 
 @registry.register_hparams
+def transformer_base_enfr():
+  hparams = transformer_base()
+  hparams.shared_embedding_and_softmax_weights = False
+  hparams.layer_prepostprocess_dropout = 0.1
+  return hparams
+
+
+@registry.register_hparams
 def transformer_med_enfr():
   hparams = transformer_small()
   hparams.shared_embedding_and_softmax_weights = False
