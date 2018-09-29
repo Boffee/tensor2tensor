@@ -78,7 +78,7 @@ def _make_example(input_ids, problem, input_feature_name="inputs"):
     tf.logging.info("Adding dummy value for feature %s as it is required by "
                     "the Problem.", fname)
     features[fname] = value
-      
+
   return tf.train.Example(features=tf.train.Features(feature=features))
 
 
@@ -174,7 +174,11 @@ def _make_features_example(features, problem, input_feature_name="inputs"):
   return tf.train.Example(features=tf.train.Features(feature=example_features))
 
 
-def predict_features(inputs_list, problem, request_fn, return_predictions=False):
+def predict_features(inputs_list,
+                     problem,
+                     request_fn,
+                     return_predictions=False,
+                     return_features=False):
   """Encodes inputs, makes request to deployed TF model, and decodes outputs."""
   assert isinstance(inputs_list, list)
   features_list = []
@@ -202,8 +206,11 @@ def predict_features(inputs_list, problem, request_fn, return_predictions=False)
         prediction["scores"])
         for prediction in predictions
     ]
-  
+
+  ret = {"outputs": outputs}
+  if return_features:
+    ret["features"] = features_list
   if return_predictions:
-    return outputs, predictions
-  else:
-    return outputs
+    ret["predictions"] = predictions
+
+  return ret
