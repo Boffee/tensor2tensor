@@ -89,12 +89,13 @@ def main(_):
     inputs = FLAGS.inputs_once if FLAGS.inputs_once else input(">> ")
     if FLAGS.json:
       inputs = json.loads(inputs)
-      outputs = serving_utils.predict_features([inputs], problem, request_fn)
+      ret = serving_utils.predict_features([inputs], problem, request_fn)
+      outputs = ret["outputs"]
     else:
       outputs = serving_utils.predict([inputs], problem, request_fn)
     outputs, = outputs
     output, score = outputs
-    if problem.multi_target:
+    if problem.multi_targets:
       print_str = """
 Input:
 {inputs}

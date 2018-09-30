@@ -318,7 +318,7 @@ class Problem(object):
     return False
 
   @property
-  def multi_target(self):
+  def multi_targets(self):
     return False
     
   def dataset_filename(self):
