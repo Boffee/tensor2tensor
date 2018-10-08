@@ -178,7 +178,8 @@ def predict_features(inputs_list,
                      problem,
                      request_fn,
                      return_predictions=False,
-                     return_features=False):
+                     return_features=False,
+                     return_beams=False):
   """Encodes inputs, makes request to deployed TF model, and decodes outputs."""
   assert isinstance(inputs_list, list)
   features_list = []
@@ -194,7 +195,7 @@ def predict_features(inputs_list,
               for features in features_list]
   predictions = request_fn(examples)
   output_decoder = problem.feature_info["targets"].encoder
-  if problem.multi_targets:
+  if problem.multi_targets or return_beams:
     outputs = [
         ([_decode(output, output_decoder) for output in prediction["outputs"]],
          prediction["scores"])
