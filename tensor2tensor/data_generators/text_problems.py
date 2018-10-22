@@ -28,6 +28,9 @@ from __future__ import division
 from __future__ import print_function
 
 import os
+import re
+import warnings
+import xml.etree.ElementTree as ET
 
 from tensor2tensor.data_generators import generator_utils
 from tensor2tensor.data_generators import problem
@@ -622,6 +625,25 @@ def text2text_generate_encoded(sample_generator,
     sample["targets"] = targets_vocab.encode(sample["targets"])
     sample["targets"].append(text_encoder.EOS_ID)
     yield sample
+
+
+def tmx_iterator(tmx_path, source_lang, target_lang):
+  sample = {}
+  lang = None
+  for event, elem in ET.iterparse(tmx_path, events=("start", "end")):
+    if elem.tag == "tuv" and event == "start":
+      lang = elem.attrib["{http://www.w3.org/XML/1998/namespace}lang"]
+    if elem.tag == "seg" and event == "end":
+      sample[lang] = elem.text.strip()
+      lang = None
+    if elem.tag == "tu" and event == "end":
+      if not sample.keys() == {source_lang, target_lang}:
+        warnings.warn("Translation unit languages missing: ",
+                      sample.keys() - {source_lang, target_lang})
+      else:
+        yield {"inputs": sample[source_lang], "targets": sample[target_lang]}
+        elem.clear()
+        sample = {}
 
 
 @registry.register_problem
