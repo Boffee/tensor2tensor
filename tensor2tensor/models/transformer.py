@@ -1682,6 +1682,14 @@ def transformer_base():
 
 
 @registry.register_hparams
+def transformer_base_u():
+  """Base parameters for Transformer model without embed sharing."""
+  hparams = transformer_base()
+  hparams.shared_embedding_and_softmax_weights = False
+  return hparams
+
+
+@registry.register_hparams
 def transformer_big():
   """HParams for transformer big model on WMT."""
   hparams = transformer_base()
