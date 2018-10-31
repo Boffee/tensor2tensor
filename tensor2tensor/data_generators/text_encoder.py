@@ -662,7 +662,7 @@ class SubwordTextEncoder(TextEncoder):
       for tok in tokenizer.encode(native_to_unicode(item)):
         token_counts[tok] += 1
     encoder = cls.build_to_target_size(
-        target_size, token_counts, 1, 5e3,
+        target_size, token_counts, 1, 1e4,
         max_subtoken_length=max_subtoken_length,
         reserved_tokens=reserved_tokens)
     return encoder
