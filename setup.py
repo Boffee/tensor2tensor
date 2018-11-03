@@ -44,6 +44,7 @@ setup(
         'oauth2client',
         'requests',
         'scipy',
+        'sentencepiece',
         'sympy',
         'six',
         'tqdm',

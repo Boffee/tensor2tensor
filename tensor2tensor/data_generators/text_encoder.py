@@ -18,6 +18,7 @@
 * ByteTextEncoder: for ascii text
 * TokenTextEncoder: with user-supplied vocabulary file
 * SubwordTextEncoder: invertible
+* SentencePieceEncoder: unigram LM
 """
 from __future__ import absolute_import
 from __future__ import division
@@ -25,8 +26,11 @@ from __future__ import print_function
 
 import collections
 from itertools import chain
+from functools import partial
 import math
+import os
 import re
+import random
 import tempfile
 import time
 import numpy as np
@@ -35,6 +39,7 @@ from six.moves import range  # pylint: disable=redefined-builtin
 from tensor2tensor.data_generators import tokenizer
 
 import tensorflow as tf
+import sentencepiece as spm
 
 # Reserved tokens for things like padding and EOS symbols.
 PAD = "<pad>"
@@ -92,7 +97,7 @@ def to_unicode_ignore_errors(s):
 
 def strip_ids(ids, ids_to_strip):
   """Strip ids_to_strip from the end ids."""
-  ids = list(ids)
+  ids = np.array(ids).tolist()
   while ids and ids[-1] in ids_to_strip:
     ids.pop()
   return ids
@@ -1057,3 +1062,147 @@ class RealEncoder(object):
     del strip_extraneous
     return " ".join([str(i) for i in ids])
 
+
+class SentencePieceEncoder(TextEncoder):
+  """Base class for converting from ints to/from human readable strings."""
+
+  def __init__(self,
+               model_filepath,
+               num_reserved_ids=NUM_RESERVED_TOKENS,
+               greedy_encode=False):
+    self._num_reserved_ids = num_reserved_ids
+    _, tmp_file_path = tempfile.mkstemp()
+    tf.gfile.Copy(model_filepath, tmp_file_path, overwrite=True)
+    model_filepath = tmp_file_path
+    self.model_filepath = model_filepath
+    self.greedy_encode = greedy_encode
+    self.sp = spm.SentencePieceProcessor()
+    self.sp.Load(model_filepath)
+
+  def __deepcopy__(self, memo):
+    return type(self)(self.model_filepath, self.num_reserved_ids)
+
+  @property
+  def num_reserved_ids(self):
+    return self._num_reserved_ids
+
+  def encode(self, s):
+    """Transform a human-readable string into a sequence of int ids.
+
+    The ids should be in the range [num_reserved_ids, vocab_size). Ids [0,
+    num_reserved_ids) are reserved.
+
+    EOS is not appended.
+
+    Args:
+      s: human-readable string to be converted.
+
+    Returns:
+      ids: list of integers
+    """
+    if self.greedy_encode:
+      _encoder = self.sp.EncodeAsIds
+    else:
+      _encoder = partial(self.sp.SampleEncodeAsIds, nbest_size=-1, alpha=0.4)
+    return [id_ + self._num_reserved_ids for id_ in _encoder(s)]
+
+  def decode(self, ids, strip_extraneous=True):
+    """Transform a sequence of int ids into a human-readable string.
+
+    EOS is not expected in ids.
+
+    Args:
+      ids: list of integers to be converted.
+      strip_extraneous: bool, whether to strip off extraneous tokens
+        (EOS and PAD).
+
+    Returns:
+      s: human-readable string.
+    """
+    ids = np.array(ids).tolist()
+    if strip_extraneous:
+      ids = strip_ids(ids, list(range(self._num_reserved_ids or 0)))
+
+    ids = [id_ - self._num_reserved_ids for id_ in ids]
+    return self.sp.DecodeIds(ids)
+
+  def decode_list(self, ids):
+    """Transform a sequence of int ids into a their string versions.
+
+    This method supports transforming individual input/output ids to their
+    string versions so that sequence to/from text conversions can be visualized
+    in a human readable format.
+
+    Args:
+      ids: list of integers to be converted.
+
+    Returns:
+      strs: list of human-readable string.
+    """
+    decoded_strs = []
+    for id_ in ids:
+      if 0 <= id_ < self._num_reserved_ids:
+        decoded_strs.append(RESERVED_TOKENS[int(id_)])
+      else:
+        decoded_strs.append(
+            self.sp.IdToPiece(int(id_) - self._num_reserved_ids))
+    return decoded_strs
+
+  @property
+  def vocab_size(self):
+    return self.sp.get_piece_size() + self._num_reserved_ids
+
+  @classmethod
+  def get_or_generate_vocab(cls,
+                            data_dir,
+                            vocab_prefix,
+                            vocab_size,
+                            data_filepaths,
+                            max_subtoken_length=15,
+                            character_coverage=0.999999,
+                            input_sentence_size=100000000,
+                            training_sentence_size=100000000,
+                            seed_sentencepiece_size=5000000,
+                            mining_sentence_size=10000000,
+                            reserved_tokens=None,
+                            greedy_encode=False):
+    """Inner implementation for vocab generators.
+
+    Args:
+      data_dir: The base directory where data and vocab files are stored. 
+        If None, then do not save the vocab even if it doesn't exist.
+      vocab_prefix: relative filename prefix where vocab file is stored.
+      vocab_size: target size of the vocab constructed by SubwordTextEncoder.
+      data_filepaths: path to raw data files to use to generate the vocab.
+      max_subtoken_length: an optional integer.  Set this to a finite value to
+        avoid quadratic costs during vocab building.
+      character_coverage: character coverage to determine the minimum symbols.
+      input_sentence_size: max number of sentences the trainer loads.
+      training_sentence_size: max number of sentences to train sentence pieces.
+      seed_sentencepiece_size: the number of seed tokens.
+      mining_sentence_size: max number of sentences generate seed tokens from.
+      reserved_tokens: List of reserved tokens. `RESERVED_TOKENS` should be a 
+        prefix of `reserved_tokens`. If `None`, defaults to `RESERVED_TOKENS`.
+      greedy_encode: Encode sentences greedily instead of sampling.
+
+    Returns:
+      A SentencePieceEncoder vocabulary object.
+    """
+    # NOTE: SentencePiece must be accessible all files from system paths.
+    vocab_filename = vocab_prefix + ".model"
+    vocab_path = os.path.join(data_dir, vocab_filename)
+    vocab_prefix_path = os.path.join(data_dir, vocab_prefix)
+    if not os.path.isfile(vocab_path):
+      random.shuffle(data_filepaths)
+      data_filepaths_str = ",".join(data_filepaths)
+      spm.SentencePieceTrainer.Train(
+          '--input={} --model_prefix={} '
+          '--vocab_size={} --max_sentencepiece_length={} '
+          '--training_sentence_size={} --seed_sentencepiece_size={} '
+          '--character_coverage={} --input_sentence_size={} '
+          '--mining_sentence_size={} --split_by_unicode_script=false'.format(
+              data_filepaths_str, vocab_prefix_path, vocab_size,
+              max_subtoken_length, training_sentence_size,
+              seed_sentencepiece_size, character_coverage, input_sentence_size,
+              mining_sentence_size))
+    return cls(vocab_path, greedy_encode=greedy_encode)

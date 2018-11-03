@@ -31,6 +31,7 @@ import os
 import re
 import warnings
 import xml.etree.ElementTree as ET
+import tempfile
 
 from tensor2tensor.data_generators import generator_utils
 from tensor2tensor.data_generators import problem
@@ -46,6 +47,7 @@ class VocabType(object):
   CHARACTER = "character"
   SUBWORD = "subwords"
   TOKEN = "tokens"
+  SENTENCEPIECE = "sentencepiece"
 
 
 class Text2TextProblem(problem.Problem):
@@ -216,6 +218,10 @@ class Text2TextProblem(problem.Problem):
       return "vocab.%s.%d.%s" % (self.dataset_filename(),
                                  self.approx_vocab_size,
                                  VocabType.SUBWORD)
+    elif self.vocab_type == VocabType.SENTENCEPIECE:
+      return "vocab.%s.%d.%s" % (self.dataset_filename(),
+                                 self.approx_vocab_size,
+                                 VocabType.SENTENCEPIECE)
     else:
       return "vocab.%s.%s" % (self.dataset_filename(), VocabType.TOKEN)
 
@@ -233,6 +239,18 @@ class Text2TextProblem(problem.Problem):
             max_subtoken_length=self.max_subtoken_length,
             reserved_tokens=(
                 text_encoder.RESERVED_TOKENS + self.additional_reserved_tokens))
+    elif self.vocab_type == VocabType.SENTENCEPIECE:
+      if force_get:
+        vocab_filepath = os.path.join(data_dir, self.vocab_filename + '.model')
+        encoder = text_encoder.SubwordTextEncoder(vocab_filepath)
+      else:
+        _, tmp_file_path = tempfile.mkstemp()
+        with open(tmp_file_path, 'w') as fh:
+          for i, text in enumerate(self.generate_text_for_vocab(data_dir, tmp_dir)):
+            fh.write(text.rstrip() + '\n')
+        encoder = text_encoder.SentencePieceEncoder.get_or_generate_vocab(
+            data_dir, self.vocab_filename, self.approx_vocab_size,
+            [tmp_file_path])
     elif self.vocab_type == VocabType.TOKEN:
       vocab_filename = os.path.join(data_dir, self.vocab_filename)
       encoder = text_encoder.TokenTextEncoder(vocab_filename,
