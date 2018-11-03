@@ -1192,7 +1192,7 @@ class SentencePieceEncoder(TextEncoder):
     vocab_filename = vocab_prefix + ".model"
     vocab_path = os.path.join(data_dir, vocab_filename)
     vocab_prefix_path = os.path.join(data_dir, vocab_prefix)
-    if not os.path.isfile(vocab_path):
+    if not tf.gfile.Exists(vocab_path):
       random.shuffle(data_filepaths)
       data_filepaths_str = ",".join(data_filepaths)
       spm.SentencePieceTrainer.Train(
