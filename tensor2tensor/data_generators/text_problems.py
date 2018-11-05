@@ -242,7 +242,7 @@ class Text2TextProblem(problem.Problem):
     elif self.vocab_type == VocabType.SENTENCEPIECE:
       if force_get:
         vocab_filepath = os.path.join(data_dir, self.vocab_filename + '.model')
-        encoder = text_encoder.SubwordTextEncoder(vocab_filepath)
+        encoder = text_encoder.SentencePieceEncoder(vocab_filepath)
       else:
         _, tmp_file_path = tempfile.mkstemp()
         with open(tmp_file_path, 'w') as fh:
