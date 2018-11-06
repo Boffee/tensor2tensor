@@ -12,15 +12,21 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 """Reinforcement learning models and parameters."""
 
 import collections
 import functools
 import operator
 import gym
+
+from tensor2tensor.data_generators import gym_env
 from tensor2tensor.layers import common_hparams
 from tensor2tensor.layers import common_layers
 from tensor2tensor.layers import discretization
+from tensor2tensor.rl.envs.py_func_batch_env import PyFuncBatchEnv
+from tensor2tensor.rl.envs.simulated_batch_env import SimulatedBatchEnv
+from tensor2tensor.rl.envs.simulated_batch_gym_env import SimulatedBatchGymEnv
 from tensor2tensor.utils import registry
 
 import tensorflow as tf
@@ -88,24 +94,6 @@ def discrete_random_action_base():
 
 @registry.register_hparams
 def ppo_atari_base():
-  """Atari base parameters."""
-  hparams = ppo_discrete_action_base()
-  hparams.learning_rate = 4e-4
-  hparams.num_agents = 5
-  hparams.epoch_length = 200
-  hparams.gae_gamma = 0.985
-  hparams.gae_lambda = 0.985
-  hparams.entropy_loss_coef = 0.002
-  hparams.value_loss_coef = 0.025
-  hparams.optimization_epochs = 10
-  hparams.epochs_num = 10000
-  hparams.num_eval_agents = 1
-  hparams.network = feed_forward_cnn_small_categorical_fun
-  return hparams
-
-
-@registry.register_hparams
-def ppo_pong_base():
   """Pong base parameters."""
   hparams = ppo_discrete_action_base()
   hparams.learning_rate = 1e-4
@@ -125,27 +113,96 @@ def ppo_pong_base():
   return hparams
 
 
-def simple_gym_spec(env):
-  """Parameters of environment specification."""
-  standard_wrappers = None
-  env_lambda = None
-  if isinstance(env, str):
-    env_lambda = lambda: gym.make(env)
-  if callable(env):
-    env_lambda = env
-  assert env_lambda is not None, "Unknown specification of environment"
+def make_real_env_fn(env):
+  """Creates a function returning a given real env, in or out of graph.
 
-  return tf.contrib.training.HParams(env_lambda=env_lambda,
-                                     wrappers=standard_wrappers,
-                                     simulated_env=False)
+  Args:
+    env: Environment to return from the function.
+
+  Returns:
+    Function in_graph -> env.
+  """
+  return lambda in_graph: PyFuncBatchEnv(env) if in_graph else env
+
+
+def make_simulated_env_fn(**env_kwargs):
+  """Returns a function creating a simulated env, in or out of graph.
+
+  Args:
+    **env_kwargs: kwargs to pass to the simulated env constructor.
+
+  Returns:
+    Function in_graph -> env.
+  """
+  def env_fn(in_graph):
+    class_ = SimulatedBatchEnv if in_graph else SimulatedBatchGymEnv
+    return class_(**env_kwargs)
+  return env_fn
+
+
+def get_policy(observations, hparams, action_space):
+  """Get a policy network.
+
+  Args:
+    observations: Tensor with observations
+    hparams: parameters
+    action_space: action space
+
+  Returns:
+    Tensor with policy and value function output
+  """
+  policy_network_lambda = hparams.policy_network
+  return policy_network_lambda(action_space, hparams, observations)
 
 
 @registry.register_hparams
 def ppo_pong_ae_base():
   """Pong autoencoder base parameters."""
-  hparams = ppo_pong_base()
+  hparams = ppo_atari_base()
   hparams.learning_rate = 1e-4
   hparams.network = dense_bitwise_categorical_fun
+  return hparams
+
+
+@registry.register_hparams
+def pong_model_free():
+  """TODO(piotrmilos): Document this."""
+  hparams = tf.contrib.training.HParams(
+      epochs_num=4,
+      eval_every_epochs=2,
+      num_agents=2,
+      optimization_epochs=3,
+      epoch_length=30,
+      entropy_loss_coef=0.003,
+      learning_rate=8e-05,
+      optimizer="Adam",
+      policy_network=feed_forward_cnn_small_categorical_fun,
+      gae_lambda=0.985,
+      num_eval_agents=2,
+      max_gradients_norm=0.5,
+      gae_gamma=0.985,
+      optimization_batch_size=4,
+      clipping_coef=0.2,
+      value_loss_coef=1,
+      save_models_every_epochs=False,
+      frame_stack_size=4,
+      force_beginning_resets=False,
+  )
+  env = gym_env.T2TGymEnv("PongNoFrameskip-v4", batch_size=2)
+  env.start_new_epoch(0)
+  hparams.add_hparam("env_fn", make_real_env_fn(env))
+  eval_env = gym_env.T2TGymEnv("PongNoFrameskip-v4", batch_size=2)
+  eval_env.start_new_epoch(0)
+  hparams.add_hparam("eval_env_fn", make_real_env_fn(eval_env))
+  return hparams
+
+
+@registry.register_hparams
+def mfrl_base():
+  hparams = ppo_atari_base()
+  hparams.add_hparam("game", "")
+  hparams.epochs_num = 3000
+  hparams.eval_every_epochs = 100
   return hparams
 
 

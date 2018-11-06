@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 """Glow generative model."""
 
 from __future__ import absolute_import
@@ -21,6 +22,7 @@ from __future__ import print_function
 import numpy as np
 from tensor2tensor.layers import common_hparams
 from tensor2tensor.layers import common_layers
+from tensor2tensor.models.research import glow_init_hook
 from tensor2tensor.models.research import glow_ops
 from tensor2tensor.utils import registry
 from tensor2tensor.utils import t2t_model
@@ -49,6 +51,10 @@ def glow_hparams():
   hparams.add_hparam("depth", 32)
   hparams.add_hparam("affine_coupling_width", 512)
   hparams.add_hparam("top_prior", "single_conv")
+  # init_batch_size denotes the number of examples used for data-dependent
+  # initialization. A higher init_batch_size is required for training
+  # stability especially when hparams.batch_size is low.
+  hparams.add_hparam("init_batch_size", 256)
   return hparams
 
 
@@ -57,6 +63,10 @@ class Glow(t2t_model.T2TModel):
   """Glow generative model.
 
   Reference: https://arxiv.org/abs/1807.03039"""
+
+  def init_preprocess(self, features):
+    """Preprocessing as per the input modality."""
+    return features
 
   def preprocess(self, x):
     """Normalize x.
@@ -99,24 +109,58 @@ class Glow(t2t_model.T2TModel):
     var_scope = tf.variable_scope("glow/body", reuse=True)
     # If eps=None, images are sampled from the prior.
     with arg_scope(ops, init=False), var_scope:
-      predictions, _, _ = glow_ops.encoder_decoder(
+      predictions, _, _, _ = glow_ops.encoder_decoder(
           "codec", self.z_sample, self.hparams, eps=None, reverse=True)
 
     return self.scale(predictions)
 
-  def top_prior(self, z):
-    """Objective based on the prior over latent z.
+  def create_init_batch(self, features):
+    """Returns a batch of size "hparams.init_batch_size" for initialization.
 
     Args:
-      z: 4-D Tensor, (batch_size, height, width, num_channels)
+      features: input features.
     Returns:
-      objective: float, log-likelihood of z under the prior.
+      init_features: initialization features.
+    """
+    train_dataset = self.hparams.problem.dataset(
+        tf.estimator.ModeKeys.TRAIN, hparams=self.hparams)
+    train_dataset = train_dataset.batch(self.hparams.init_batch_size)
+    train_dataset = self.init_preprocess(train_dataset)
+    return train_dataset.make_one_shot_iterator().get_next()
+
+  @staticmethod
+  def train_hooks(hook_context):
+    del hook_context
+    return [glow_init_hook.GlowInitHook()]
+
+  def top_prior(self):
+    """Objective based on the prior over latent z.
+
+    Returns:
       dist: instance of tf.distributions.Normal, prior distribution.
     """
     return glow_ops.top_prior(
-        "top_prior", z, learn_prior=self.hparams.top_prior)
+        "top_prior", self.z_top_shape, learn_prior=self.hparams.top_prior)
 
   def body(self, features):
+    init_features = self.create_init_batch(features)
+    init_op = self.objective_tower(init_features, init=True)
+    init_op = tf.Print(
+        init_op, [init_op], message="Triggering data-dependent init.",
+        first_n=20)
+    tf.add_to_collection("glow_init_op", init_op)
+    train_op = self.objective_tower(features, init=False)
+    return tf.zeros_like(features["targets"]), {"training": train_op}
+
+  def objective_tower(self, features, init=True):
+    """Objective in terms of bits-per-pixel.
+
+    Args:
+      features: dict of tensors with "features" and "targets" keys.
+      init: Whether or not to run data-dependent init.
+    Returns:
+      objective: float, bits-per-pixel.
+    """
     x = features["inputs"]
 
     # Scale x such that the pixels lie in-between -0.5 and.0.5
@@ -127,20 +171,20 @@ class Glow(t2t_model.T2TModel):
     # the per-channel output activations have zero mean and unit variance
     # ONLY during the first step. After that the parameters are learned
     # through optimisation.
-    global_step = tf.train.get_or_create_global_step()
-    init_op = tf.logical_and(tf.equal(global_step, 0), self.is_training)
     ops = [glow_ops.get_variable_ddi, glow_ops.actnorm]
-    with arg_scope(ops, init=init_op):
-      self.z, encoder_objective, self.eps, _ = glow_ops.encoder_decoder(
+    with arg_scope(ops, init=init):
+      self.z, encoder_objective, self.eps, _, _ = glow_ops.encoder_decoder(
           "codec", x, self.hparams, eps=None, reverse=False)
       objective += encoder_objective
 
-      prior_objective, prior_dist = self.top_prior(self.z)
-      tf.summary.scalar("top_prior", tf.reduce_mean(prior_objective))
+      self.z_top_shape = common_layers.shape_list(self.z)
+      prior_dist = self.top_prior()
+      prior_objective = tf.reduce_sum(
+          prior_dist.log_prob(self.z), axis=[1, 2, 3])
       self.z_sample = prior_dist.sample()
       objective += prior_objective
 
     # bits per pixel
     _, h, w, c = common_layers.shape_list(x)
     objective = -objective / (np.log(2) * h * w * c)
-    return tf.zeros_like(features["targets"]), {"training": objective}
+    return objective

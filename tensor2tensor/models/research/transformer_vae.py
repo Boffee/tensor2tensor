@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 """AE Transformer."""
 
 from __future__ import absolute_import
@@ -28,6 +29,7 @@ from tensor2tensor.layers import common_image_attention as cia
 from tensor2tensor.layers import common_layers
 from tensor2tensor.layers import discretization
 from tensor2tensor.layers import latent_layers
+from tensor2tensor.layers import modalities
 from tensor2tensor.models import transformer
 from tensor2tensor.utils import beam_search
 from tensor2tensor.utils import expert_utils
@@ -629,10 +631,6 @@ class TransformerAE(t2t_model.T2TModel):
           ema_count=ema_count,
           ema_means=ema_means)
 
-  @property
-  def has_input(self):
-    return self._problem_hparams.input_modality
-
   def body(self, features):
     inputs = features["inputs"] if "inputs" in features else None
     if self._hparams.drop_inputs:
@@ -723,6 +721,10 @@ class TransformerAE(t2t_model.T2TModel):
     """Constructs `tf.estimator.EstimatorSpec` for EVAL (evaluation) mode."""
     estimator_spec = super(TransformerAE, self).estimator_spec_eval(
         features, logits, labels, loss, losses_dict)
+    if common_layers.is_xla_compiled():
+      # For TPUs (and XLA more broadly?), do not add summary hooks that depend
+      # on losses; they are not supported.
+      return estimator_spec
 
     summary_op = tf.get_collection(tf.GraphKeys.SUMMARIES, scope="losses")
     summary_op.extend(tf.get_collection(tf.GraphKeys.SUMMARIES, scope="loss"))
@@ -888,7 +890,7 @@ def imagetransformer_ae_cifar():
 
   hparams.add_hparam("unconditional", False)  # unconditional generation
 
-  hparams.target_modality = "image:channel_embeddings_bottom"
+  hparams.modality["targets"] = modalities.ImageChannelEmbeddingsBottom
   hparams.drop_inputs = True
   hparams.do_attend_compress = False
   hparams.do_attend_decompress = False

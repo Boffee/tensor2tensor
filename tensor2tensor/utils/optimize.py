@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 """Optimization."""
 from __future__ import absolute_import
 from __future__ import division
@@ -20,6 +21,7 @@ import numpy as np
 
 from tensor2tensor.layers import common_layers
 from tensor2tensor.utils import adafactor
+from tensor2tensor.utils import mlperf_log
 from tensor2tensor.utils import multistep_optimizer
 from tensor2tensor.utils import yellowfin
 
@@ -78,6 +80,15 @@ class ConditionalOptimizer(tf.train.Optimizer):
   def __init__(self, optimizer_name, lr, hparams, use_tpu=False):  # pylint: disable=super-init-not-called
     tf.logging.info("Using optimizer %s", optimizer_name)
 
+    mlperf_log.transformer_print(key=mlperf_log.OPT_NAME, value=optimizer_name)
+    mlperf_log.transformer_print(
+        key=mlperf_log.OPT_HP_ADAM_BETA1, value=hparams.optimizer_adam_beta1)
+    mlperf_log.transformer_print(
+        key=mlperf_log.OPT_HP_ADAM_BETA2, value=hparams.optimizer_adam_beta2)
+    mlperf_log.transformer_print(
+        key=mlperf_log.OPT_HP_ADAM_EPSILON,
+        value=hparams.optimizer_adam_epsilon)
+
     if optimizer_name == "Adam":
       # We change the default epsilon for Adam.
       # Using LazyAdam as it's much faster for large vocabulary embeddings.
@@ -103,6 +114,20 @@ class ConditionalOptimizer(tf.train.Optimizer):
           learning_rate=lr, momentum=hparams.optimizer_momentum_momentum)
     elif optimizer_name == "TrueAdam":
       self._opt = tf.train.AdamOptimizer(
+          lr,
+          beta1=hparams.optimizer_adam_beta1,
+          beta2=hparams.optimizer_adam_beta2,
+          epsilon=hparams.optimizer_adam_epsilon)
+    elif optimizer_name == "AdamW":
+      # Openai gpt used weight decay.
+      # Given the internals of AdamW, weight decay dependent on the
+      # learning rate is chosen to match the openai implementation.
+      # The weight decay update to each parameter is applied before the adam
+      # gradients computation, which is different from that described
+      # in the paper and in the openai implementation:
+      # https://arxiv.org/pdf/1711.05101.pdf
+      self._opt = tf.contrib.opt.AdamWOptimizer(
+          0.01*lr,
           lr,
           beta1=hparams.optimizer_adam_beta1,
           beta2=hparams.optimizer_adam_beta2,
@@ -158,7 +183,7 @@ def weight_noise(noise_rate, learning_rate, var_list):
   noise_ops = []
 
   for v in var_list:
-    with tf.device(v._ref().device):  # pylint: disable=protected-access
+    with tf.device(v.device):  # pylint: disable=protected-access
       scale = noise_rate * learning_rate * 0.001
       if common_layers.should_generate_summaries():
         tf.summary.scalar("weight_noise_scale", scale)
@@ -240,6 +265,9 @@ def get_variable_initializer(hparams):
   """Get variable initializer from hparams."""
   if not hparams.initializer:
     return None
+
+  mlperf_log.transformer_print(key=mlperf_log.MODEL_HP_INITIALIZER_GAIN,
+                               value=hparams.initializer_gain)
 
   if not tf.contrib.eager.in_eager_mode():
     tf.logging.info("Using variable initializer: %s", hparams.initializer)

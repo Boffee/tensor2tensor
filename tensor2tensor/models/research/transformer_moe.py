@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 """transformer (attention seq-seq model) with mixtures of experts.
 
 """
@@ -55,8 +56,8 @@ SEP_FF = "-"
 class TransformerMoe(t2t_model.T2TModel):
   """Attention net.  See file docstring."""
 
-  @property
-  def use_body_sharded(self):
+  @staticmethod
+  def use_body_sharded():
     return True
 
   def body_sharded(self, sharded_features):
@@ -105,7 +106,6 @@ class TransformerMoe(t2t_model.T2TModel):
     layers = common_attention.get_standardized_layers(
         hparams=hparams,
         dp=dp,
-        ps_devices=self._ps_devices,
     )
 
     if hparams.mode == tf.estimator.ModeKeys.TRAIN:

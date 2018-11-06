@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 """Layers common to multiple models."""
 from __future__ import absolute_import
 from __future__ import division
@@ -235,6 +236,7 @@ def convert_real_to_rgb(x):
   """Conversion of real numbers to pixel values."""
   with tf.name_scope("real_to_rgb", values=[x]):
     x *= 255.0
+    x = tf.round(x)
     return x
 
 
@@ -2820,7 +2822,20 @@ def sample_with_temperature(logits, temperature):
 
 
 def ones_matrix_band_part(rows, cols, num_lower, num_upper, out_shape=None):
-  """Matrix band part of ones."""
+  """Matrix band part of ones.
+
+  Args:
+    rows: int determining number of rows in output
+    cols: int
+    num_lower: int, maximum distance backward. Negative values indicate
+      unlimited.
+    num_upper: int, maximum distance forward. Negative values indicate
+      unlimited.
+    out_shape: shape to reshape output by.
+
+  Returns:
+    Tensor of size rows * cols reshaped into shape out_shape.
+  """
   if all([isinstance(el, int) for el in [rows, cols, num_lower, num_upper]]):
     # Needed info is constant, so we construct in numpy
     if num_lower < 0:
@@ -3018,8 +3033,10 @@ def mix(x1,
     if is_xla_compiled():
       return get_res()
     else:
-      return tf.cond(
-          tf.less(tf.train.get_global_step(), steps), get_res, lambda: x1)
+      cur_step = tf.train.get_global_step()
+      if cur_step is None:
+        return x1  # Step not available, probably eval mode, don't mix.
+      return tf.cond(tf.less(cur_step, steps), get_res, lambda: x1)
 
 
 def brelu(x):

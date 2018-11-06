@@ -12,17 +12,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 """Collect trajectories from interactions of agent with environment."""
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
 
-import copy
-
-from tensor2tensor.rl.envs.batch_env_factory import batch_env_factory
+from tensor2tensor.models.research.rl import get_policy
+from tensor2tensor.rl.envs.tf_atari_wrappers import StackWrapper
 from tensor2tensor.rl.envs.tf_atari_wrappers import WrapperBase
-from tensor2tensor.rl.envs.utils import get_policy
 
 import tensorflow as tf
 
@@ -83,37 +82,29 @@ class _MemoryWrapper(WrapperBase):
       return tf.identity(reward), tf.identity(done)
 
 
-def define_collect(hparams, scope, eval_phase,
-                   collect_level=-1,
-                   policy_to_actions_lambda=None):
+def define_collect(batch_env, hparams, scope):
   """Collect trajectories.
 
   Args:
+    batch_env: Batch environment.
     hparams: HParams.
     scope: var scope.
-    eval_phase: bool, is eval phase.
-    collect_level: int, which level to collect observations.
-    policy_to_actions_lambda: lambda.
 
   Returns:
-    Returns memory (observtions, rewards, dones, actions,
+    Returns memory (observations, rewards, dones, actions,
     pdfs, values_functions)
-    containing a rollout of environment from collect_level of nested wrapper
-    structure. Note that pdfs and values_functions are meaningful only if
-    collect_level==-1.
+    containing a rollout of environment from nested wrapped structure.
   """
 
   to_initialize = []
   with tf.variable_scope(scope, reuse=tf.AUTO_REUSE):
-    batch_env = batch_env_factory(hparams)
+    num_agents = hparams.num_agents
+
     to_initialize.append(batch_env)
-    environment_wrappers = hparams.environment_spec.wrappers
-    wrappers = copy.copy(environment_wrappers) if environment_wrappers else []
-    # Put memory wrapper at the level you want to gather observations at.
-    # Negative indices need to be shifted for insert to work correctly.
-    collect_level = collect_level if \
-      collect_level >= 0 else len(wrappers) + collect_level + 1
-    wrappers.insert(collect_level, [_MemoryWrapper, {}])
+    wrappers = [
+        (StackWrapper, {"history": hparams.frame_stack_size}),
+        (_MemoryWrapper, {})
+    ]
     rollout_metadata = None
     speculum = None
     for w in wrappers:
@@ -121,9 +112,9 @@ def define_collect(hparams, scope, eval_phase,
                       % (str(w[0]), str(w[1]), str(batch_env)))
       batch_env = w[0](batch_env, **w[1])
       to_initialize.append(batch_env)
-      if w[0] == _MemoryWrapper:
-        rollout_metadata = _rollout_metadata(batch_env)
-        speculum = batch_env.speculum
+
+    rollout_metadata = _rollout_metadata(batch_env)
+    speculum = batch_env.speculum
 
     def initialization_lambda(sess):
       for batch_env in to_initialize:
@@ -140,15 +131,13 @@ def define_collect(hparams, scope, eval_phase,
     cumulative_rewards = tf.get_variable("cumulative_rewards", len(batch_env),
                                          trainable=False)
 
-    eval_phase = tf.convert_to_tensor(eval_phase)
+    eval_phase_t = tf.convert_to_tensor(hparams.eval_phase)
     should_reset_var = tf.Variable(True, trainable=False)
     zeros_tensor = tf.zeros(len(batch_env))
 
-  if "force_beginning_resets" in hparams:
-    force_beginning_resets = hparams.force_beginning_resets
-  else:
-    force_beginning_resets = False
-  force_beginning_resets = tf.convert_to_tensor(force_beginning_resets)
+  force_beginning_resets = tf.convert_to_tensor(
+      hparams.force_beginning_resets
+  )
 
   def reset_ops_group():
     return tf.group(batch_env.reset(tf.range(len(batch_env))),
@@ -173,23 +162,20 @@ def define_collect(hparams, scope, eval_phase,
 
       def env_step(arg1, arg2, arg3):  # pylint: disable=unused-argument
         """Step of the environment."""
-        actor_critic = get_policy(tf.expand_dims(obs_copy, 0), hparams)
+        actor_critic = get_policy(
+            tf.expand_dims(obs_copy, 0), hparams, batch_env.action_space
+        )
         policy = actor_critic.policy
-        if policy_to_actions_lambda:
-          action = policy_to_actions_lambda(policy)
-        else:
-          action = tf.cond(eval_phase,
-                           policy.mode,
-                           policy.sample)
+        action = hparams.policy_to_actions_lambda(policy)
 
         postprocessed_action = actor_critic.action_postprocessing(action)
         reward, done = batch_env.simulate(postprocessed_action[0, ...])
 
         pdf = policy.prob(action)[0]
         value_function = actor_critic.value[0]
-        pdf = tf.reshape(pdf, shape=(hparams.num_agents,))
-        value_function = tf.reshape(value_function, shape=(hparams.num_agents,))
-        done = tf.reshape(done, shape=(hparams.num_agents,))
+        pdf = tf.reshape(pdf, shape=(num_agents,))
+        value_function = tf.reshape(value_function, shape=(num_agents,))
+        done = tf.reshape(done, shape=(num_agents,))
 
         with tf.control_dependencies([reward, done]):
           return tf.identity(pdf), tf.identity(value_function), \
@@ -201,9 +187,9 @@ def define_collect(hparams, scope, eval_phase,
           lambda _1, _2, _3: tf.equal(speculum.size(), 0),
           env_step,
           [
-              tf.constant(0.0, shape=(hparams.num_agents,)),
-              tf.constant(0.0, shape=(hparams.num_agents,)),
-              tf.constant(False, shape=(hparams.num_agents,))
+              tf.constant(0.0, shape=(num_agents,)),
+              tf.constant(0.0, shape=(num_agents,)),
+              tf.constant(False, shape=(num_agents,))
           ],
           parallel_iterations=1,
           back_prop=False,
@@ -236,8 +222,8 @@ def define_collect(hparams, scope, eval_phase,
                 scores_num + scores_num_delta]
 
     def stop_condition(i, _, resets):
-      return tf.cond(eval_phase,
-                     lambda: resets < hparams.num_eval_agents,
+      return tf.cond(eval_phase_t,
+                     lambda: resets < num_agents,
                      lambda: i < hparams.epoch_length)
 
     init = [tf.constant(0), tf.constant(0.0), tf.constant(0)]
@@ -269,7 +255,8 @@ def define_collect(hparams, scope, eval_phase,
     # When generating real data together with PPO training we must use single
     # agent. For PPO to work we reshape the history, as if it was generated
     # by real_ppo_effective_num_agents.
-    if getattr(hparams, "effective_num_agents", None):
+    if (getattr(hparams, "effective_num_agents", None) and
+        not hparams.eval_phase):
       new_memory = []
       effective_num_agents = hparams.effective_num_agents
       assert hparams.epoch_length % effective_num_agents == 0, (
