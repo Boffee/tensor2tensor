@@ -46,7 +46,6 @@ class MultiProblem(problem.Problem):
 
   def generate_data(self, data_dir, tmp_dir, task_id=-1):
     assert len(self.task_list) > 1
-
     for task in self.task_list:
       task.generate_data(data_dir, tmp_dir, task_id)
 
@@ -75,25 +74,35 @@ class MultiProblem(problem.Problem):
           example["targets"] = example[
               "targets"][:hparams.multiproblem_max_target_length]
 
+    def make_constant_shape(x, size):
+      x = x[:size]
+      xlen = tf.shape(x)[0]
+      x = tf.pad(x, [[0, size - xlen]])
+      return tf.reshape(x, [size])
+
     if task.has_inputs:
       if is_infer:
         concat_list = [example["inputs"], [task.task_id]]
-        example["inputs"] = tf.concat(concat_list, 0)
+        example["inputs"] = tf.concat(concat_list, axis=0)
       else:
         inputs = example.pop("inputs")
         concat_list = [inputs, [task.task_id], example["targets"]]
-        example["targets"] = tf.concat(concat_list, 0)
+        example["targets"] = tf.concat(concat_list, axis=0)
+        if hparams.multiproblem_fixed_train_length > 0:
+          example["targets"] = make_constant_shape(
+              example["targets"], hparams.multiproblem_fixed_train_length)
     else:
       concat_list = [[task.task_id], example["targets"]]
-      example["targets"] = tf.concat(concat_list, 0)
+      example["targets"] = tf.concat(concat_list, axis=0)
+      if not is_infer and hparams.multiproblem_fixed_train_length > 0:
+        example["targets"] = make_constant_shape(
+            example["targets"], hparams.multiproblem_fixed_train_length)
 
-    min_task_id = min([t.task_id for t in self.task_list])
-    example["task_id"] = tf.constant([task.task_id - min_task_id],
-                                     dtype=tf.int64)
+    example["task_id"] = tf.constant([task.task_id], dtype=tf.int64)
     return example
 
   def filepattern(self, data_dir, mode, shard=None):
-    print("Generating multi problem filepattern")
+    tf.logging.info("Generating multi problem filepattern")
     return [task.filepattern(data_dir, mode, shard) for task in self.task_list]
 
   def get_hparams(self, model_hparams=None):
@@ -109,6 +118,7 @@ class MultiProblem(problem.Problem):
     if model_hparams.multiproblem_vocab_size > new_vocab_size:
       new_vocab_size = model_hparams.multiproblem_vocab_size
     tf.logging.info("Old vocabulary size: %d" % vocab_size)
+    self.update_task_ids(vocab_size)
     tf.logging.info("New vocabulary size: %d" % new_vocab_size)
     self._hparams.vocab_size["targets"] = new_vocab_size
     self._hparams.modality["targets"] = modalities.SymbolModality(
@@ -150,8 +160,7 @@ class MultiProblem(problem.Problem):
               partition_id=0,
               num_partitions=1,
               shuffle_buffer_size=1024,
-              max_records=-1,
-              only_last=False):
+              max_records=-1):
 
     # A list of datasets corresponding to the tasks in the task_list object
     # that need to be mixed.
@@ -164,8 +173,9 @@ class MultiProblem(problem.Problem):
       raise ValueError("Only support language models as primary problem which "
                        "supplies the vocabulary and the hparams.")
     enc = primary_task.feature_encoders(data_dir=data_dir)["targets"]
+    self.update_task_ids(enc.vocab_size)
 
-    for idx, task in enumerate(self.task_list):
+    for task in self.task_list:
       task_dataset = task.dataset(mode=mode,
                                   data_dir=data_dir,
                                   num_threads=num_threads,
@@ -178,11 +188,7 @@ class MultiProblem(problem.Problem):
                                   partition_id=partition_id,
                                   num_partitions=num_partitions,
                                   shuffle_buffer_size=shuffle_buffer_size,
-                                  max_records=max_records,
-                                  only_last=only_last)
-
-      if idx == 0:
-        self.update_task_ids(enc)
+                                  max_records=max_records)
 
       if is_training:
         task_dataset = task_dataset.repeat()
@@ -206,12 +212,15 @@ class MultiProblem(problem.Problem):
     self.get_hparams(model_hparams=hparams)
 
     if is_training:
-      problem_step = tf.get_variable("problem_step",
-                                     shape=[],
-                                     dtype=tf.int64,
-                                     initializer=tf.zeros_initializer(),
-                                     trainable=False,
-                                     use_resource=True)
+      # Using tf.Variable instead of get_variable to work around issues with
+      # queues on multiple hosts. Note that this will separately count steps
+      # on each host that's feeding the data, so in a large-scale setting you
+      # may need to adjust hparams for that. For example, a 4x4 slice of a TPU
+      # pod may use 2 data hosts, so we'll be only adding 1 here once for 2
+      # examples -- divide the corresponding hparams by 2 to compensate.
+      problem_step = tf.Variable(tf.constant(0, dtype=tf.int64),
+                                 trainable=False, use_resource=True,
+                                 dtype=tf.int64, name="problem_step")
       dataset_iterators = [d.make_one_shot_iterator() for d in datasets]
 
       def get_next_from_dataset(dataset_iter):
@@ -282,7 +291,6 @@ class MultiProblem(problem.Problem):
             A Tensor representing an example from the task that was sampled
             from.
           """
-
           if num_tasks_left == 0:
             return get_next_from_dataset(dataset_iterators[curr_task])
 
@@ -324,21 +332,19 @@ class MultiProblem(problem.Problem):
         metrics.Metrics.ACC, metrics.Metrics.NEG_LOG_PERPLEXITY,
     ]
 
-  def update_task_ids(self, encoder):
+  def update_task_ids(self, encoder_vocab_size):
     """Generate task_ids for each problem.
 
     These ids correspond to the index of the task in the task_list.
 
     Args:
-      encoder: this provides the size of the vocab which is used to compute
+      encoder_vocab_size: the size of the vocab which is used to compute
         the index offset.
     """
-    offset = encoder.vocab_size
-
-    for idx, _ in enumerate(self.task_list):
-      self.task_list[idx].set_task_id(idx + offset)
-      print(self.task_list[idx].name)
-      print(self.task_list[idx].task_id)
+    for idx, task in enumerate(self.task_list):
+      task.set_task_id(idx + encoder_vocab_size)
+      tf.logging.info("Task %d (%s) has id %d." %
+                      (idx, task.name, task.task_id))
 
   def get_max_num_classes(self):
     """Compute the maximum number of classes any subtask has.

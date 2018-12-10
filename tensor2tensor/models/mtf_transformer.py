@@ -21,7 +21,6 @@ from __future__ import print_function
 
 import copy
 import mesh_tensorflow as mtf
-
 from tensor2tensor.layers import common_hparams
 from tensor2tensor.layers import common_layers
 from tensor2tensor.layers import modalities
@@ -35,6 +34,27 @@ import tensorflow as tf
 @registry.register_model
 class MtfTransformer(mtf_model.MtfModel):
   """Transformer in mesh_tensorflow."""
+
+  def __init__(self,
+               hparams,
+               mode=tf.estimator.ModeKeys.TRAIN,
+               problem_hparams=None,
+               data_parallelism=None,
+               decode_hparams=None,
+               **kwargs):
+    """Init with assignments of hparams.encoder_layers / decoder_layers."""
+    # Finalize encoder_layers, decoder_layers
+    hparams.encoder_layers = (
+        hparams.encoder_layers * hparams.encoder_replicate_factor)
+    hparams.decoder_layers = (
+        hparams.decoder_layers * hparams.decoder_replicate_factor)
+
+    super(MtfTransformer, self).__init__(hparams,
+                                         mode=mode,
+                                         problem_hparams=problem_hparams,
+                                         data_parallelism=data_parallelism,
+                                         decode_hparams=decode_hparams,
+                                         **kwargs)
 
   @property
   def batch_dims(self):
@@ -151,9 +171,76 @@ class MtfTransformer(mtf_model.MtfModel):
     return (inputs_embedding_var, targets_embedding_var,
             softmax_var, positional_embedding_var)
 
+  def _noisy_targets_from_spec(self, targets, noising_spec, losses=None):
+    if noising_spec["type"] == "mask":
+      # Replace a randomly-chosen noising_spec["prob"] of input tokens with 0.
+      return targets * mtf.cast(
+          mtf.greater(mtf.random_uniform(targets.mesh, targets.shape),
+                      noising_spec["prob"]), targets.dtype)
+    elif noising_spec["type"] == "random_zipfian":
+      # Replace a randomly-chosen noising_spec["prob"] of input tokens.
+      # Rather than drawing the replacement tokens uniformly, we sample from
+      #   a distribution favoring lower token-ids, assuming that the ids have
+      #   been assigned in frequency order.  The probability of choosing an
+      #   id is proportional to 1/(id+10)
+      logits = mtf.log(1.0 / (mtf.range(
+          targets.mesh, self.targets_vocab_dim, dtype=tf.float32) + 10.0))
+      logits = mtf.broadcast(logits, new_shape=targets.shape + logits.shape)
+      r = mtf.sample_with_temperature(logits, self.targets_vocab_dim)
+      use_noise = mtf.less(
+          mtf.random_uniform(targets.mesh, targets.shape), noising_spec["prob"])
+      return mtf.where(use_noise, r, targets)
+    elif noising_spec["type"] == "transformer":
+      # Train a small transformer to fill in masked out values, then
+      # sample from it.
+      hparams = self._hparams
+      if hparams.mode != tf.estimator.ModeKeys.TRAIN:
+        raise NotImplementedError("Not implemented")
+      noiser_hparams = copy.copy(self._hparams)
+      noiser_hparams.del_hparam("mode")
+      noiser_hparams.override_from_dict(noising_spec["overrides"])
+      with tf.variable_scope("noiser"):
+        noiser = MtfTransformer(
+            noiser_hparams,
+            mode=hparams.mode,
+            problem_hparams=self._problem_hparams)
+        logits, loss = noiser._mtf_model_fn(  # pylint: disable=protected-access
+            self._original_features, targets.mesh)
+        samples = mtf.sample_with_temperature(logits, self.targets_vocab_dim)
+      losses.append(loss)
+      return samples
+    else:
+      raise ValueError("unknown noising spec %s" % noising_spec)
+
+  def _noisy_targets(self, targets, losses=None):
+    """Generate noisy targets for denoising models.
+
+    Args:
+      targets: a Tensor
+      losses: an optional list onto which to append traning losses
+    Returns:
+      a Tensor the same dtype and shape as Targets
+    """
+    hparams = self._hparams
+    if hparams.mode == tf.estimator.ModeKeys.TRAIN:
+      nt_train = self._noisy_targets_from_spec(
+          targets, hparams.noising_spec_train, losses=losses)
+      if hparams.noising_use_eval_during_train > 0:
+        nt_eval = self._noisy_targets_from_spec(
+            targets, hparams.noising_spec_eval)
+        use_eval_noising = mtf.less(
+            mtf.random_uniform(targets.mesh, targets.shape - self.length_dim),
+            hparams.noising_use_eval_during_train)
+        nt_train = mtf.where(use_eval_noising, nt_eval, nt_train)
+      return nt_train
+    else:
+      return self._noisy_targets_from_spec(targets, hparams.noising_spec_eval)
+
   def _mtf_model_fn(self, features, mesh):
+    self._original_features = features
     features = copy.copy(features)
     hparams = self._hparams
+    extra_losses = []
     targets = tf.to_int32(features["targets"])
     if len(targets.get_shape()) > 2:
       tf.logging.info("targets = %s" % targets)
@@ -165,15 +252,19 @@ class MtfTransformer(mtf_model.MtfModel):
       x = tf.reshape(x, [hparams.batch_size, hparams.max_length])
       return x
     targets = pad_to_max_length(targets)
+    targets = self._import_to_batch_by_length(targets, "targets", mesh, hparams)
     for key in ["targets_segmentation", "targets_position",
                 "inputs_segmentation", "inputs_position"]:
       if key in features:
         features[key] = pad_to_max_length(features[key])
-    shifted_targets = common_layers.shift_right_2d(targets)
-
-    targets = self._import_to_batch_by_length(targets, "targets", mesh, hparams)
-    shifted_targets = self._import_to_batch_by_length(
-        shifted_targets, "shifted_targets", mesh, hparams)
+    if hparams.decoder_type == "autoregressive":
+      shifted_targets = mtf.shift(
+          targets, offset=1, dim=self.length_dim, wrap=False)
+    elif hparams.decoder_type == "denoising":
+      shifted_targets = self._noisy_targets(targets, extra_losses)
+    else:
+      raise ValueError(
+          "unknown hparams.decoder_type = %s" % hparams.decoder_type)
 
     if "targets_segmentation" in features:
       # "Packed" dataset - keep the examples from seeing each other.
@@ -183,22 +274,24 @@ class MtfTransformer(mtf_model.MtfModel):
       targets_position = self._import_to_batch_by_length(
           features["targets_position"], "targets_position",
           mesh, hparams)
-      decoder_self_attention_mask = (
-          mtf.layers.attention_mask_autoregressive(
-              targets_position, dtype=self.activation_dtype) +
-          mtf.layers.attention_mask_same_segment(
-              targets_segmentation, dtype=self.activation_dtype))
+      decoder_self_attention_mask = mtf.layers.attention_mask_same_segment(
+          targets_segmentation, dtype=self.activation_dtype)
+      if hparams.decoder_type == "autoregressive":
+        decoder_self_attention_mask += mtf.layers.attention_mask_autoregressive(
+            targets_position, dtype=self.activation_dtype)
     else:
       targets_position = mtf.range(mesh, self.length_dim, dtype=tf.int32)
-      decoder_self_attention_mask = mtf.layers.attention_mask_autoregressive(
-          targets_position, dtype=self.activation_dtype)
+      if hparams.decoder_type == "autoregressive":
+        decoder_self_attention_mask = mtf.layers.attention_mask_autoregressive(
+            targets_position, dtype=self.activation_dtype)
+      else:
+        decoder_self_attention_mask = None
 
     def layer_prepostprocess_dropout(x):
       return mtf.dropout(
           x, keep_prob=1.0 - hparams.layer_prepostprocess_dropout,
           noise_shape=mtf.Shape(self.batch_dims + [self.model_dim]))
 
-    extra_losses = []
     (inputs_embedding_var,
      targets_embedding_var,
      softmax_var,
@@ -263,6 +356,20 @@ class MtfTransformer(mtf_model.MtfModel):
             self_attention_mask=decoder_self_attention_mask,
             encdec_attention_mask=encoder_decoder_attention_mask,
             losses=extra_losses)
+    if (hparams.reshape_logits_hack and
+        hparams.mode == tf.estimator.ModeKeys.TRAIN):
+      # For some reason, the logits computation is extremely slow on TPU
+      # in some cases where the batch size per core is 1.  Reshape the logits
+      # and the targets to double the batch size and halve the length.
+      # TODO(noam): file a bug.
+      old_dims = self.batch_dims + [self.length_dim]
+      new_dims = self.batch_dims[:-1] + [
+          mtf.Dimension(self.batch_dims[-1].name,
+                        self.batch_dims[-1].size * 2),
+          mtf.Dimension(self.length_dim.name, self.length_dim.size // 2)]
+      x = mtf.reshape(x, new_dims + [self.model_dim])
+      targets = mtf.reshape(targets, new_dims)
+
     logits = mtf.matmul(x, softmax_var)
     if hparams.mode == tf.estimator.ModeKeys.TRAIN:
       logits = mtf.layers.multiplicative_jitter(logits, epsilon=1e-2)
@@ -277,18 +384,22 @@ class MtfTransformer(mtf_model.MtfModel):
     loss = mtf.reduce_mean(loss * weights)
     for l in extra_losses:
       loss += l
+    if (hparams.reshape_logits_hack and
+        hparams.mode == tf.estimator.ModeKeys.TRAIN):
+      logits = mtf.reshape(logits, old_dims + [self.targets_vocab_dim])
     logits = mtf.to_float(logits)
-    # combine batch dims
-    if len(self.batch_dims) > 1:
-      combined_batch_dim = mtf.Dimension(
-          self.batch_dims[0].name, mtf.Shape(self.batch_dims).size)
-      logits = mtf.reshape(
-          logits, [combined_batch_dim] + logits.shape.dims[-2:])
     return logits, loss
 
   def mtf_model_fn(self, features, mesh):
     with tf.variable_scope("transformer"):
-      return self._mtf_model_fn(features, mesh)
+      logits, loss = self._mtf_model_fn(features, mesh)
+      # combine batch dims
+      if len(self.batch_dims) > 1:
+        combined_batch_dim = mtf.Dimension(
+            self.batch_dims[0].name, mtf.Shape(self.batch_dims).size)
+        logits = mtf.reshape(
+            logits, [combined_batch_dim] + logits.shape.dims[-2:])
+      return logits, loss
 
   @property
   def _targets_vocab_size(self):
@@ -481,6 +592,22 @@ class MtfTransformer(mtf_model.MtfModel):
                         hparams.layout, hparams.mesh_shape,
                         self.max_length_dim),
                     name="local_att"))
+        elif layer_type == "compressed_att":
+          if is_incremental:
+            raise ValueError("compressed_att incremental not implemented")
+          else:
+            x += layer_prepostprocess_dropout(
+                mtf.layers.multihead_self_attention_memory_compressed(
+                    normalize(x),
+                    mask_right=True,
+                    compression_factor=hparams.compression_factor,
+                    kv_channels=self.kv_dim,
+                    heads=self.heads_dim,
+                    dropout=hparams.attention_dropout,
+                    dropout_broadcast_dims=[self.length_dim],
+                    master_dtype=self.master_dtype,
+                    slice_dtype=self.slice_dtype,
+                    name="compressed_att"))
         else:
           if is_incremental:
             # insert length dimension.
@@ -680,6 +807,8 @@ def mtf_transformer_base():
   hparams.add_hparam("layout", "batch:batch;vocab:model;d_ff:model;heads:model")
   hparams.add_hparam("num_heads", 8)
   hparams.add_hparam("d_ff", 2048)
+  hparams.add_hparam("encoder_replicate_factor", 1)
+  hparams.add_hparam("decoder_replicate_factor", 1)
   hparams.add_hparam("encoder_layers", ["att", "drd"] * 6)
   hparams.add_hparam("decoder_layers", ["att", "enc_att", "drd"] * 6)
   hparams.add_hparam("attention_dropout", 0.1)
@@ -687,11 +816,22 @@ def mtf_transformer_base():
   hparams.layer_prepostprocess_dropout = 0.1
 
   # Describes what model architecture:
-  #   "encdec": encoder + autoregerssive decoder
+  #   "encdec": encoder + autoregressive decoder
   #   "decoder": single-stack autoregressive sequence model.
   #   "encoder": single-stack non-autoregressive model
   #      with equal-length inputs and outputs.
   hparams.add_hparam("transformer_type", "encdec")
+
+  # What does the decoder do:
+  #   "autoregressive": Decoder left to right
+  #   "denoising": Fills in masked-out values simultaneously
+  hparams.add_hparam("decoder_type", "autoregressive")
+
+  # Parameters describing the noising algorithm for denoising decoders
+  hparams.add_hparam("noising_spec_train", {"type": "mask", "prob": 0.15})
+  hparams.add_hparam("noising_spec_eval", {"type": "mask", "prob": 0.15})
+  # during training, we use the eval noiser with this probability
+  hparams.add_hparam("noising_use_eval_during_train", 0.1)
 
   # round up vocab sizes to be a multiple of this value
   hparams.vocab_divisor = 128
@@ -735,6 +875,10 @@ def mtf_transformer_base():
   # hparams.batch_size // hparams.outer_batch_size.
   hparams.add_hparam("outer_batch_size", 0)
 
+  # TODO(noam): file a bug
+  hparams.add_hparam("reshape_logits_hack", False)
+  hparams.add_hparam("compression_factor", 4)
+
   return hparams
 
 
@@ -771,6 +915,16 @@ def mtf_transformer_tiny_lm():
   hparams.transformer_type = "decoder"
   hparams.label_smoothing = 0.0
   hparams.sampling_method = "random"
+  return hparams
+
+
+@registry.register_hparams
+def mtf_transformer_tiny_denoising():
+  hparams = mtf_transformer_tiny_lm()
+  hparams.decoder_type = "denoising"
+  hparams.noising_spec_train = ("random_zipfian", 0.3)
+  hparams.noising_use_eval_during_train = 0.5
+  hparams.max_length = 1024
   return hparams
 
 

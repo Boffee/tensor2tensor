@@ -63,6 +63,7 @@ def decode_hparams(overrides=""):
       delimiter="\n",
       decode_to_file=None,
       decode_in_memory=False,
+      summaries_log_dir="decode",  # Directory to write hook summaries.
       shards=1,    # How many shards of data to decode (treating 1 as None).
       shard_id=0,  # Which shard are we decoding if more than 1 above.
       shards_start_offset=0,  # Number of the first shard to decode.
@@ -70,6 +71,8 @@ def decode_hparams(overrides=""):
       force_decode_length=False,
       multi_targets=False,
       display_decoded_images=False,
+      # Multi-problem decoding task id.
+      multiproblem_task_id=-1,
       # Used for video decoding.
       frames_per_second=10,
       skip_eos_postprocess=False,
@@ -78,8 +81,11 @@ def decode_hparams(overrides=""):
       # Maximum number of videos displayed.
       # Total number of videos are max_display_outputs * num_decodes
       max_display_outputs=10,
+      # Used in computation of VGG feature based video metrics.
+      # Set this to be the path to a trained VGG ckpt to output
+      # useful metrics.
+      vgg_ckpt_path=None,
       # Used for MLPerf compliance logging.
-      mlperf_mode=False,
       mlperf_decode_step=0.0,
       mlperf_threshold=25.0,
       mlperf_success=False)
@@ -334,7 +340,7 @@ def decode_once(estimator,
     if decode_to_file:
       for i, (d_input, d_output, d_target) in enumerate(decoded_outputs):
         # Skip if all padding
-        if re.match("^({})+$".format(text_encoder.PAD), d_input):
+        if d_input and re.match("^({})+$".format(text_encoder.PAD), d_input):
           continue
         beam_score_str = ""
         if decode_hp.write_beam_scores:
@@ -347,7 +353,9 @@ def decode_once(estimator,
         num_predictions >= decode_hp.num_samples):
       break
 
-  mlperf_log.transformer_print(key=mlperf_log.EVAL_SIZE, value=num_eval_samples)
+  mlperf_log.transformer_print(key=mlperf_log.EVAL_SIZE,
+                               value=num_eval_samples,
+                               hparams=hparams)
 
   if decode_to_file:
     output_file.close()
@@ -381,9 +389,10 @@ def decode_from_file(estimator,
   num_decode_batches = (len(sorted_inputs) - 1) // decode_hp.batch_size + 1
 
   def input_fn():
-    input_gen = _decode_batch_input_fn(num_decode_batches, sorted_inputs,
-                                       inputs_vocab, decode_hp.batch_size,
-                                       decode_hp.max_input_size)
+    input_gen = _decode_batch_input_fn(
+        num_decode_batches, sorted_inputs,
+        inputs_vocab, decode_hp.batch_size,
+        decode_hp.max_input_size, task_id=decode_hp.multiproblem_task_id)
     gen_fn = make_input_fn_from_generator(input_gen)
     example = gen_fn()
     return _decode_input_tensor_to_features_dict(example, hparams)
@@ -414,6 +423,8 @@ def decode_from_file(estimator,
                               axis=0)
       scores = None
       if "scores" in result:
+        if np.isscalar(result["scores"]):
+          result["scores"] = result["scores"].reshape(1)
         scores = np.split(result["scores"], result["scores"].shape[0], axis=0)
       for k, beam in enumerate(output_beams):
         tf.logging.info("BEAM %d:" % k)
@@ -569,6 +580,8 @@ def decode_interactively(estimator, hparams, decode_hp, checkpoint_path=None):
       beams = np.split(result["outputs"], result["outputs"].shape[0], axis=0)
       scores = None
       if "scores" in result:
+        if np.isscalar(result["scores"]):
+          result["scores"] = result["scores"].reshape(1)
         scores = np.split(result["scores"], result["scores"].shape[0], axis=0)
       for k, beam in enumerate(beams):
         tf.logging.info("BEAM %d:" % k)
@@ -588,7 +601,7 @@ def decode_interactively(estimator, hparams, decode_hp, checkpoint_path=None):
 
 
 def _decode_batch_input_fn(num_decode_batches, sorted_inputs, vocabulary,
-                           batch_size, max_input_size):
+                           batch_size, max_input_size, task_id=-1):
   """Generator to produce batches of inputs."""
   tf.logging.info(" batch %d" % num_decode_batches)
   # First reverse all the input sentences so that if you're going to get OOMs,
@@ -603,7 +616,8 @@ def _decode_batch_input_fn(num_decode_batches, sorted_inputs, vocabulary,
       if max_input_size > 0:
         # Subtract 1 for the EOS_ID.
         input_ids = input_ids[:max_input_size - 1]
-      input_ids.append(text_encoder.EOS_ID)
+      final_id = text_encoder.EOS_ID if task_id < 0 else task_id
+      input_ids.append(final_id)
       batch_inputs.append(input_ids)
       if len(input_ids) > batch_length:
         batch_length = len(input_ids)
@@ -872,7 +886,7 @@ def run_postdecode_hooks(decode_hook_args, dataset_split):
     return
   tf.logging.info("Running decode hooks.")
   parent_dir = os.path.join(decode_hook_args.output_dirs[0], os.pardir)
-  child_dir = "decode"
+  child_dir = decode_hook_args.decode_hparams.summaries_log_dir
   if dataset_split is not None:
     child_dir += "_{}".format(dataset_split)
   final_dir = os.path.join(parent_dir, child_dir)

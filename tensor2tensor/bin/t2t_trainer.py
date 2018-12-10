@@ -39,7 +39,7 @@ from tensorflow.contrib.tpu.python.tpu import tpu_config
 flags = tf.flags
 FLAGS = flags.FLAGS
 
-# See flags.py for additional command-line flags.
+# See utils/flags.py for additional command-line flags.
 flags.DEFINE_string("t2t_usr_dir", None,
                     "Path to a Python module that will be imported. The "
                     "__init__.py file should include the necessary imports. "
@@ -75,7 +75,6 @@ flags.DEFINE_bool(
     "Whether to use TensorFlow DistributionStrategy instead of explicitly "
     "replicating the model. DistributionStrategy is used only if the "
     "model replication configuration is supported by the DistributionStrategy.")
-
 # To maintain compatibility with some internal libs, we guard against these flag
 # definitions possibly erroring. Apologies for the ugliness.
 try:
@@ -188,6 +187,7 @@ def create_experiment_fn():
       eval_early_stopping_metric_delta=FLAGS.eval_early_stopping_metric_delta,
       eval_early_stopping_metric_minimize=FLAGS
       .eval_early_stopping_metric_minimize,
+      eval_timeout_mins=FLAGS.eval_timeout_mins,
       use_tpu=FLAGS.use_tpu,
       use_tpu_estimator=FLAGS.use_tpu_estimator,
       use_xla=FLAGS.xla_compile,
@@ -355,15 +355,25 @@ def run_std_server():
 
 def main(argv):
   tf.logging.set_verbosity(tf.logging.INFO)
+
+  usr_dir.import_usr_dir(FLAGS.t2t_usr_dir)
+
+  # If we just have to print the registry, do that and exit early.
+  maybe_log_registry_and_exit()
+
+  # Create HParams.
+  if argv:
+    set_hparams_from_args(argv[1:])
+  hparams = create_hparams()
+
   if FLAGS.schedule == "train" or FLAGS.schedule == "train_eval_and_decode":
-    mlperf_log.transformer_print(key=mlperf_log.RUN_START)
+    mlperf_log.transformer_print(key=mlperf_log.RUN_START, hparams=hparams)
   if FLAGS.schedule == "run_std_server":
     run_std_server()
   mlperf_log.transformer_print(
-      key=mlperf_log.RUN_SET_RANDOM_SEED, value=FLAGS.random_seed)
+      key=mlperf_log.RUN_SET_RANDOM_SEED, value=FLAGS.random_seed,
+      hparams=hparams)
   trainer_lib.set_random_seed(FLAGS.random_seed)
-  usr_dir.import_usr_dir(FLAGS.t2t_usr_dir)
-  maybe_log_registry_and_exit()
 
   if FLAGS.cloud_mlengine:
     cloud_mlengine.launch()
@@ -375,17 +385,14 @@ def main(argv):
   if cloud_mlengine.job_dir():
     FLAGS.output_dir = cloud_mlengine.job_dir()
 
-  if argv:
-    set_hparams_from_args(argv[1:])
-  hparams = create_hparams()
-
   exp_fn = create_experiment_fn()
   exp = exp_fn(create_run_config(hparams), hparams)
   if is_chief():
     save_metadata(hparams)
   execute_schedule(exp)
   if FLAGS.schedule != "train":
-    mlperf_log.transformer_print(key=mlperf_log.RUN_FINAL)
+    mlperf_log.transformer_print(key=mlperf_log.RUN_FINAL,
+                                 hparams=hparams)
 
 
 if __name__ == "__main__":

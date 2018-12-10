@@ -24,6 +24,7 @@ from __future__ import print_function
 from tensor2tensor.models.research.rl import get_policy
 
 import tensorflow as tf
+import tensorflow_probability as tfp
 
 
 def get_optimiser(config):
@@ -35,7 +36,10 @@ def get_optimiser(config):
 def define_ppo_step(data_points, optimizer, hparams, action_space):
   """Define ppo step."""
   observation, action, discounted_reward, norm_advantage, old_pdf = data_points
-  new_policy_dist, new_value, _ = get_policy(observation, hparams, action_space)
+
+  (logits, new_value) = get_policy(observation, hparams, action_space)
+  new_policy_dist = tfp.distributions.Categorical(logits=logits)
+
   new_pdf = new_policy_dist.prob(action)
 
   ratio = new_pdf / old_pdf
@@ -73,7 +77,7 @@ def define_ppo_step(data_points, optimizer, hparams, action_space):
     return [tf.identity(x) for x in losses + gradients_norms]
 
 
-def define_ppo_epoch(memory, hparams, action_space):
+def define_ppo_epoch(memory, hparams, action_space, batch_size):
   """PPO epoch."""
   observation, reward, done, action, old_pdf, value = memory
 
@@ -102,8 +106,8 @@ def define_ppo_epoch(memory, hparams, action_space):
   number_of_batches = ((hparams.epoch_length-1) * hparams.optimization_epochs
                        / hparams.optimization_batch_size)
 
-  if hasattr(hparams, "effective_num_agents"):
-    number_of_batches *= hparams.num_agents
+  if hparams.effective_num_agents is not None:
+    number_of_batches *= batch_size
     number_of_batches /= hparams.effective_num_agents
 
   dataset = tf.data.Dataset.from_tensor_slices(
@@ -112,7 +116,7 @@ def define_ppo_epoch(memory, hparams, action_space):
   dataset = dataset.shuffle(buffer_size=hparams.epoch_length-1,
                             reshuffle_each_iteration=True)
   dataset = dataset.repeat(-1)
-  dataset = dataset.batch(hparams.optimization_batch_size)
+  dataset = dataset.batch(hparams.optimization_batch_size, drop_remainder=True)
   iterator = dataset.make_initializable_iterator()
   optimizer = get_optimiser(hparams)
 

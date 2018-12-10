@@ -34,9 +34,17 @@ def optimize(loss, learning_rate, hparams, use_tpu=False):
   """Minimize loss."""
   loss = weight_decay_and_noise(loss, hparams, learning_rate)
   loss = tf.identity(loss, name="total_loss")
+  # Print trainable variables.
   log_variable_sizes(verbose=hparams.summarize_vars)
+  # Print non-trainable variables.
+  non_trainable_variables = list(
+      set(tf.global_variables()) - set(tf.trainable_variables()))
+  log_variable_sizes(non_trainable_variables, tag="Non-trainable variables",
+                     verbose=hparams.summarize_vars)
   if hparams.summarize_vars:
     summarize_variables()
+    # Summarize non-trainable variables as well
+    summarize_variables(non_trainable_variables, tag="Non-trainable variables")
   diet_vars = [
       v for v in tf.global_variables() if v.dtype == dtypes.float16_ref
   ]
@@ -80,14 +88,19 @@ class ConditionalOptimizer(tf.train.Optimizer):
   def __init__(self, optimizer_name, lr, hparams, use_tpu=False):  # pylint: disable=super-init-not-called
     tf.logging.info("Using optimizer %s", optimizer_name)
 
-    mlperf_log.transformer_print(key=mlperf_log.OPT_NAME, value=optimizer_name)
+    mlperf_log.transformer_print(key=mlperf_log.OPT_NAME,
+                                 value=optimizer_name,
+                                 hparams=hparams)
     mlperf_log.transformer_print(
-        key=mlperf_log.OPT_HP_ADAM_BETA1, value=hparams.optimizer_adam_beta1)
+        key=mlperf_log.OPT_HP_ADAM_BETA1, value=hparams.optimizer_adam_beta1,
+        hparams=hparams)
     mlperf_log.transformer_print(
-        key=mlperf_log.OPT_HP_ADAM_BETA2, value=hparams.optimizer_adam_beta2)
+        key=mlperf_log.OPT_HP_ADAM_BETA2, value=hparams.optimizer_adam_beta2,
+        hparams=hparams)
     mlperf_log.transformer_print(
         key=mlperf_log.OPT_HP_ADAM_EPSILON,
-        value=hparams.optimizer_adam_epsilon)
+        value=hparams.optimizer_adam_epsilon,
+        hparams=hparams)
 
     if optimizer_name == "Adam":
       # We change the default epsilon for Adam.
@@ -267,7 +280,8 @@ def get_variable_initializer(hparams):
     return None
 
   mlperf_log.transformer_print(key=mlperf_log.MODEL_HP_INITIALIZER_GAIN,
-                               value=hparams.initializer_gain)
+                               value=hparams.initializer_gain,
+                               hparams=hparams)
 
   if not tf.contrib.eager.in_eager_mode():
     tf.logging.info("Using variable initializer: %s", hparams.initializer)

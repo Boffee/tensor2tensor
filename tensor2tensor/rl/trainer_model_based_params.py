@@ -43,8 +43,7 @@ flags.DEFINE_string("eval_results_dir", "/tmp",
 HP_SCOPES = ["loop", "model", "ppo"]
 
 
-@registry.register_hparams
-def rlmb_base():
+def _rlmb_base():
   return tf.contrib.training.HParams(
       epochs=15,
       # Total frames used for training. This will be distributed evenly across
@@ -54,33 +53,16 @@ def rlmb_base():
       num_real_env_frames=96000,
       generative_model="next_frame_basic_deterministic",
       generative_model_params="next_frame_pixel_noise",
-      base_algo="ppo",
-      base_algo_params="ppo_atari_base",
       autoencoder_train_steps=0,
       autoencoder_train_steps_initial_multiplier=10,
       autoencoder_hparams_set="autoencoder_discrete_pong",
       model_train_steps=15000,
       initial_epoch_train_steps_multiplier=3,
-      simulated_env_generator_num_steps=2000,
-      simulation_random_starts=True,  # Use random starts in PPO.
+      # Use random starts when learning agent on simulated env.
+      simulation_random_starts=True,
       # Flip the first random frame in PPO batch for the true beginning.
-      simulation_flip_first_random_for_beginning=True,
+      simulation_flip_first_random_for_beginning=False,
       intrinsic_reward_scale=0.,
-      ppo_epochs_num=1000,  # This should be enough to see something
-      # Our simulated envs do not know how to reset.
-      # You should set ppo_time_limit to the value you believe that
-      # the simulated env produces a reasonable output.
-      ppo_time_limit=200,  # TODO(blazej): this param is unused
-      # It makes sense to have ppo_time_limit=ppo_epoch_length,
-      # though it is not necessary.
-      ppo_epoch_length=50,
-      ppo_num_agents=16,
-      # Do not eval since simulated batch env does not produce dones
-      ppo_eval_every_epochs=0,
-      ppo_learning_rate=1e-4,  # Will be changed, just so it exists.
-      # Whether the PPO agent should be restored from the previous iteration, or
-      # should start fresh each time.
-      ppo_continue_training=True,
       # Resizing.
       resize_height_factor=2,
       resize_width_factor=2,
@@ -95,16 +77,12 @@ def rlmb_base():
       # In your experiments, you want to optimize this rate to your schedule.
       learning_rate_bump=3.0,
 
-      real_ppo_epochs_num=0,
-      # This needs to be divisible by real_ppo_effective_num_agents.
-      real_ppo_epoch_length=16*200,
-      real_ppo_num_agents=1,
-      real_ppo_learning_rate=1e-4,
-      real_ppo_continue_training=True,
-      real_ppo_effective_num_agents=16,
-      real_ppo_eval_every_epochs=0,
+      # Policy sampling temperature to use when gathering data from the real
+      # environment.
+      real_sampling_temp=1.0,
 
-      eval_num_agents=30,
+      # Sampling temperatures to try during eval.
+      eval_sampling_temps=[0.0, 0.2, 0.5, 0.8, 1.0, 2.0],
       eval_max_num_noops=8,
 
       game="pong",
@@ -114,14 +92,99 @@ def rlmb_base():
       # Number of concurrent rollouts in world model evaluation.
       wm_eval_batch_size=16,
       # Number of batches to run for world model evaluation.
-      wm_eval_epochs_num=8,
+      wm_eval_num_batches=8,
       # Ratios of ppo_epoch_length to report reward_accuracy on.
       wm_eval_rollout_ratios=[0.25, 0.5, 1, 2],
       stop_loop_early=False,  # To speed-up tests.
-      env_timesteps_limit=-1,  # Use default from gym.make()
+      rl_env_max_episode_steps=-1,  # Use default from gym.make()
       # Number of last observations to feed to the agent and world model.
       frame_stack_size=4,
+      # This is only used for world-model evaluation currently, PolicyLearner
+      # uses algorithm specific hparams to set this during training.
+      simulated_rollout_length=50,
+
+      # To be overridden.
+      base_algo="",
+      base_algo_params="",
+      # Number of real environments to train on simultaneously.
+      real_batch_size=-1,
+      # Number of simulated environments to train on simultaneously.
+      simulated_batch_size=-1,
+      # Batch size during evaluation. Metrics are averaged over this number of
+      # rollouts.
+      eval_batch_size=-1,
   )
+
+
+def update_hparams(hparams, other):
+  for key, value in six.iteritems(other):
+    if key in hparams.values():
+      hparams.set_hparam(key, value)
+    else:
+      hparams.add_hparam(key, value)
+
+
+@registry.register_hparams
+def rlmb_ppo_base():
+  """HParams for PPO base."""
+  hparams = _rlmb_base()
+  ppo_params = dict(
+      base_algo="ppo",
+      base_algo_params="ppo_original_params",
+      # Number of real environments to train on simultaneously.
+      real_batch_size=1,
+      # Number of simulated environments to train on simultaneously.
+      simulated_batch_size=16,
+      eval_batch_size=30,
+
+      # Unused; number of PPO epochs is calculated from the real frame limit.
+      real_ppo_epochs_num=0,
+      # Number of frames that can be taken from the simulated environment before
+      # it diverges, used for training the agent.
+
+      ppo_epochs_num=1000,  # This should be enough to see something
+      # Should be equal to simulated_rollout_length.
+      # TODO(koz4k): Uncouple this by outputing done from SimulatedBatchEnv.
+      ppo_epoch_length=hparams.simulated_rollout_length,
+      # Do not eval since simulated batch env does not produce dones
+      ppo_eval_every_epochs=0,
+      ppo_learning_rate=1e-4,  # Will be changed, just so it exists.
+      # This needs to be divisible by real_ppo_effective_num_agents.
+      real_ppo_epoch_length=16 * 200,
+      real_ppo_learning_rate=1e-4,
+      real_ppo_effective_num_agents=16,
+      real_ppo_eval_every_epochs=0,
+
+      simulation_flip_first_random_for_beginning=True,
+  )
+  update_hparams(hparams, ppo_params)
+  return hparams
+
+
+@registry.register_hparams
+def rlmb_base():
+  return rlmb_ppo_base()
+
+
+@registry.register_hparams
+def rlmb_dqn_base():
+  """rlmb_dqn_base params."""
+  hparams = _rlmb_base()
+  simulated_rollout_length = 10
+  dqn_params = dict(
+      base_algo="dqn",
+      base_algo_params="dqn_original_params",
+      real_batch_size=1,
+      simulated_batch_size=1,
+      dqn_agent_generates_trainable_dones=False,
+      eval_batch_size=1,
+      # Must be equal to dqn_time_limit for now
+      simulated_rollout_length=simulated_rollout_length,
+      dqn_time_limit=simulated_rollout_length,
+      simulation_flip_first_random_for_beginning=False,
+  )
+  update_hparams(hparams, dqn_params)
+  return hparams
 
 
 @registry.register_hparams
@@ -132,7 +195,6 @@ def rlmb_basetest():
   hparams.epochs = 2
   hparams.num_real_env_frames = 3200
   hparams.model_train_steps = 100
-  hparams.simulated_env_generator_num_steps = 20
   hparams.ppo_epochs_num = 2
   return hparams
 
@@ -217,6 +279,18 @@ def rlmb_base_stochastic_discrete():
   hparams.grayscale = False
   hparams.generative_model = "next_frame_basic_stochastic_discrete"
   hparams.generative_model_params = "next_frame_basic_stochastic_discrete"
+  return hparams
+
+
+@registry.register_hparams
+def rlmb_long_stochastic_discrete():
+  """Long setting with stochastic discrete model."""
+  hparams = rlmb_base()
+  hparams.learning_rate_bump = 1.0
+  hparams.grayscale = False
+  hparams.generative_model = "next_frame_basic_stochastic_discrete"
+  hparams.generative_model_params = "next_frame_basic_stochastic_discrete_long"
+  hparams.ppo_epochs_num = 2000
   return hparams
 
 
@@ -384,38 +458,67 @@ def rlmb_model_only():
   return hp
 
 
+def _rlmb_tiny_overrides():
+  """Parameters to override for tiny setting excluding agent-related hparams."""
+  return dict(
+      epochs=1,
+      num_real_env_frames=128,
+      model_train_steps=2,
+      max_num_noops=1,
+      eval_max_num_noops=1,
+      generative_model_params="next_frame_tiny",
+      stop_loop_early=True,
+      resize_height_factor=2,
+      resize_width_factor=2,
+      wm_eval_rollout_ratios=[1],
+      rl_env_max_episode_steps=7,
+      simulated_rollout_length=2,
+      eval_sampling_temps=[0.0, 1.0],
+  )
+
+
+@registry.register_hparams
+def rlmb_ppo_tiny():
+  """Tiny set for testing."""
+  hparams = rlmb_ppo_base()
+  hparams = hparams.override_from_dict(_rlmb_tiny_overrides())
+  update_hparams(hparams, dict(
+      ppo_epochs_num=2,
+      ppo_epoch_length=hparams.simulated_rollout_length,
+      real_ppo_epoch_length=36,
+      real_ppo_effective_num_agents=2,
+      real_batch_size=1,
+      eval_batch_size=1,
+  ))
+  return hparams
+
+
 @registry.register_hparams
 def rlmb_tiny():
+  return rlmb_ppo_tiny()
+
+
+@registry.register_hparams
+def rlmb_dqn_tiny():
   """Tiny set for testing."""
-  return rlmb_base_sampling().override_from_dict(
-      tf.contrib.training.HParams(
-          epochs=1,
-          num_real_env_frames=128,
-          simulated_env_generator_num_steps=64,
-          model_train_steps=2,
-          ppo_epochs_num=2,
-          ppo_time_limit=5,
-          ppo_epoch_length=2,
-          ppo_num_agents=2,
-          real_ppo_epoch_length=36,
-          real_ppo_num_agents=1,
-          real_ppo_epochs_num=0,
-          real_ppo_effective_num_agents=2,
-          eval_num_agents=1,
-          generative_model_params="next_frame_tiny",
-          stop_loop_early=True,
-          resize_height_factor=2,
-          resize_width_factor=2,
-          game="pong",
-          wm_eval_rollout_ratios=[1],
-          env_timesteps_limit=6,
-      ).values())
+  hparams = rlmb_dqn_base()
+  hparams = hparams.override_from_dict(_rlmb_tiny_overrides())
+  update_hparams(hparams, dict(
+      simulated_rollout_length=2,
+      dqn_time_limit=2,
+      dqn_num_frames=128,
+      real_dqn_replay_buffer_replay_capacity=100,
+      dqn_replay_buffer_replay_capacity=100,
+      real_dqn_agent_min_replay_history=10,
+      dqn_agent_min_replay_history=10,
+  ))
+  return hparams
 
 
 @registry.register_hparams
 def rlmb_tiny_stochastic():
   """Tiny setting with a stochastic next-frame model."""
-  hparams = rlmb_tiny()
+  hparams = rlmb_ppo_tiny()
   hparams.epochs = 1  # Too slow with 2 for regular runs.
   hparams.generative_model = "next_frame_basic_stochastic"
   hparams.generative_model_params = "next_frame_basic_stochastic"
@@ -425,7 +528,7 @@ def rlmb_tiny_stochastic():
 @registry.register_hparams
 def rlmb_tiny_recurrent():
   """Tiny setting with a recurrent next-frame model."""
-  hparams = rlmb_tiny()
+  hparams = rlmb_ppo_tiny()
   hparams.epochs = 1  # Too slow with 2 for regular runs.
   hparams.generative_model = "next_frame_basic_recurrent"
   hparams.generative_model_params = "next_frame_basic_recurrent"
@@ -435,7 +538,7 @@ def rlmb_tiny_recurrent():
 @registry.register_hparams
 def rlmb_tiny_sv2p():
   """Tiny setting with a tiny sv2p model."""
-  hparams = rlmb_tiny()
+  hparams = rlmb_ppo_tiny()
   hparams.generative_model = "next_frame_sv2p"
   hparams.generative_model_params = "next_frame_sv2p_tiny"
   hparams.grayscale = False
@@ -465,7 +568,6 @@ def rlmb_ae_basetest():
   hparams.num_real_env_frames = 3200
   hparams.model_train_steps = 100
   hparams.autoencoder_train_steps = 10
-  hparams.simulated_env_generator_num_steps = 20
   hparams.ppo_epochs_num = 2
   return hparams
 
@@ -557,9 +659,9 @@ def rlmb_whitelisted_games(rhp):
 
 @registry.register_ranged_hparams
 def rlmb_human_score_games(rhp):
-  rhp.set_discrete("model.moe_loss_coef", list(range(10)))
   rhp.set_categorical("loop.game",
                       gym_env.ATARI_GAMES_WITH_HUMAN_SCORE)
+  rhp.set_discrete("model.moe_loss_coef", list(range(5)))
 
 
 @registry.register_ranged_hparams
@@ -688,6 +790,17 @@ def rlmb_logits_clip(rhp):
   rhp.set_categorical("loop.game", ["pong", "boxing", "seaquest"])
   rhp.set_discrete("model.moe_loss_coef", list(range(10)))
   rhp.set_discrete("ppo.logits_clip", [0., 5.])
+
+
+@registry.register_ranged_hparams
+def rlmb_games_problematic_for_ppo(rhp):
+  games = [
+      "alien", "boxing", "breakout", "ms_pacman", "video_pinball",
+  ]
+  rhp.set_categorical("loop.game", games)
+  rhp.set_categorical("loop.base_algo_params", ["ppo_original_params"])
+  rhp.set_discrete("model.moe_loss_coef", list(range(10)))
+  rhp.set_discrete("ppo.logits_clip", [0., 4.0])
 
 
 @registry.register_ranged_hparams

@@ -41,8 +41,9 @@ class NextFrameBasicStochastic(
     base_vae.NextFrameBaseVae):
   """Stochastic version of basic next-frame model."""
 
-  def inject_latent(self, layer, inputs, target):
+  def inject_latent(self, layer, inputs, target, action):
     """Inject a VAE-style latent."""
+    del action
     # Latent for stochastic model
     filters = 128
     full_video = tf.stack(inputs + [target], axis=1)
@@ -65,7 +66,55 @@ class NextFrameBasicStochasticDiscrete(
     basic_deterministic.NextFrameBasicDeterministic):
   """Basic next-frame model with a tiny discrete latent."""
 
-  def inject_latent(self, layer, inputs, target):
+  def init_internal_states(self):
+    if not self.hparams.concat_internal_states:
+      return None
+    # Hardcoded frame shapes.
+    max_batch_size = max(64, self.hparams.batch_size)
+    shape = [max_batch_size] + self.hparams.problem.frame_shape[:-1] + [32]
+    with tf.variable_scope("clean_scope_for_internal_state"):
+      v = tf.get_variable("state", shape, trainable=False,
+                          initializer=tf.zeros_initializer())
+    return [[v]]
+
+  def reset_internal_states_ops(self):
+    if not self.hparams.concat_internal_states:
+      return [[tf.no_op()]]
+    zeros = [[tf.zeros_like(s)] for s in self.internal_states[0]]
+    return self.save_internal_states_ops(zeros)
+
+  def load_internal_states_ops(self):
+    if not self.hparams.concat_internal_states:
+      return [[tf.no_op()]]
+    ops = [[s.read_value()] for s in self.internal_states[0]]
+    return ops
+
+  def save_internal_states_ops(self, internal_states):
+    if not self.hparams.concat_internal_states:
+      return [[tf.no_op()]]
+    ops = [[tf.assign(x, y)]
+           for x, y in zip(self.internal_states[0], internal_states[0])]
+    return ops
+
+  def update_internal_states_early(self, internal_states, frames):
+    """Update the internal states early in the network in GRU-like way."""
+    batch_size = common_layers.shape_list(frames[0])[0]
+    internal_state = internal_states[0][0][:batch_size, :, :, :]
+    state_activation = tf.concat([internal_state, frames[0]], axis=-1)
+    state_gate_candidate = tf.layers.conv2d(
+        state_activation, 64, (3, 3), padding="SAME", name="state_conv")
+    state_gate, state_candidate = tf.split(state_gate_candidate, 2, axis=-1)
+    state_gate = tf.nn.sigmoid(state_gate)
+    state_candidate = tf.tanh(state_candidate)
+    internal_state = internal_state * state_gate
+    internal_state += state_candidate * (1.0 - state_gate)
+    max_batch_size = max(64, self.hparams.batch_size)
+    diff_batch_size = max_batch_size - batch_size
+    internal_state = tf.pad(
+        internal_state, [[0, diff_batch_size], [0, 0], [0, 0], [0, 0]])
+    return [[internal_state]]
+
+  def inject_latent(self, layer, inputs, target, action):
     """Inject a deterministic latent based on the target frame."""
     hparams = self.hparams
     final_filters = common_layers.shape_list(layer)[-1]
@@ -99,6 +148,11 @@ class NextFrameBasicStochasticDiscrete(
         frames, filters, name="latent_embed",
         bias_initializer=tf.random_normal_initializer(stddev=0.01))
     x = common_attention.add_timing_signal_nd(x)
+
+    # Add embedded action if present.
+    if action is not None:
+      x = common_video.inject_additional_input(
+          x, action, "action_enc_latent", hparams.action_injection)
 
     if hparams.full_latent_tower:
       for i in range(hparams.num_compress_steps):
@@ -199,19 +253,30 @@ def next_frame_basic_stochastic_discrete():
   hparams.dropout = 0.15
   hparams.filter_double_steps = 3
   hparams.hidden_size = 96
-  hparams.learning_rate_constant = 0.005
+  hparams.learning_rate_constant = 0.002
   hparams.learning_rate_warmup_steps = 2000
   hparams.learning_rate_schedule = "linear_warmup * constant"
-  hparams.add_hparam("bottleneck_bits", 256)
+  hparams.concat_internal_states = True
+  hparams.video_modality_loss_cutoff = 0.03
+  hparams.add_hparam("bottleneck_bits", 128)
   hparams.add_hparam("bottleneck_noise", 0.1)
   hparams.add_hparam("discretize_warmup_steps", 40000)
   hparams.add_hparam("latent_rnn_warmup_steps", 40000)
-  hparams.add_hparam("latent_rnn_max_sampling", 0.6)
-  hparams.add_hparam("latent_use_max_probability", 0.8)
+  hparams.add_hparam("latent_rnn_max_sampling", 0.5)
+  hparams.add_hparam("latent_use_max_probability", 0.7)
   hparams.add_hparam("full_latent_tower", False)
   hparams.add_hparam("latent_predictor_state_size", 128)
-  hparams.add_hparam("latent_predictor_temperature", 0.9)
+  hparams.add_hparam("latent_predictor_temperature", 1.0)
   hparams.add_hparam("complex_addn", True)
+  return hparams
+
+
+@registry.register_hparams
+def next_frame_basic_stochastic_discrete_long():
+  """Conv model with stochastic discrete latent, long predictions."""
+  hparams = next_frame_basic_stochastic_discrete()
+  hparams.batch_size = 2
+  hparams.video_num_target_frames = 16
   return hparams
 
 

@@ -40,11 +40,22 @@ from tensorflow.python import debug
 
 
 def next_checkpoint(model_dir, timeout_mins=240):
-  """Yields successive checkpoints from model_dir."""
+  """Yields successive checkpoints from model_dir.
+
+  Args:
+    model_dir: The directory in which checkpoints are saved.
+    timeout_mins: The maximum amount of time in minutes to wait
+                  between checkpoints. Set this to -1 to wait indefinitely.
+  Yields:
+    last_ckpt: a new checkpoint path, or None if the timeout was reached.
+  """
   last_ckpt = None
+  timeout_secs = None
+  if timeout_mins != -1:
+    timeout_secs = timeout_mins * 60
   while True:
     last_ckpt = tf.contrib.training.wait_for_new_checkpoint(
-        model_dir, last_ckpt, seconds_to_sleep=60, timeout=60 * timeout_mins)
+        model_dir, last_ckpt, seconds_to_sleep=60, timeout=timeout_secs)
 
     if last_ckpt is None:
       tf.logging.info(
@@ -462,10 +473,12 @@ class T2TExperiment(object):
           self._train_spec.input_fn,
           steps=eval_steps,
           hooks=self._train_spec.hooks)
+      self._set_eval_dir_name("eval")
       self._estimator.evaluate(
           self._eval_spec.input_fn,
           steps=self._eval_spec.steps,
-          hooks=self._eval_spec.hooks)
+          hooks=self._eval_spec.hooks,
+          name="eval")
       if packed_dataset:
         problem = registry.problem(
             self._hparams.problem.name.replace("_packed", ""))
@@ -473,45 +486,59 @@ class T2TExperiment(object):
         self._hparams.problem = problem
         self._hparams.problem_hparams = p_hparams
       mlperf_log.transformer_print(key=mlperf_log.EVAL_START)
-      if self._decode_hparams.mlperf_mode:
+      if self._hparams.mlperf_mode:
         self._decode_hparams.mlperf_decode_step = i + eval_steps
       self.decode(dataset_split=tf.estimator.ModeKeys.EVAL)
       d_hparams = self._decode_hparams
-      if d_hparams.mlperf_mode and d_hparams.mlperf_success:
+      if self._hparams.mlperf_mode and d_hparams.mlperf_success:
         mlperf_log.transformer_print(
             key=mlperf_log.RUN_STOP, value={"success": "true"})
         break
 
     d_hparams = self._decode_hparams
-    if d_hparams.mlperf_mode and not d_hparams.mlperf_success:
+    if self._hparams.mlperf_mode and not d_hparams.mlperf_success:
       mlperf_log.transformer_print(
           key=mlperf_log.RUN_STOP, value={"success": "false"})
 
+  def _set_eval_dir_name(self, eval_dir_name):
+    attr = "eval_dir_name"
+    hp = self._hparams
+    if attr not in hp:
+      hp.add_hparam(attr, "")
+    hp.eval_dir_name = eval_dir_name
+
   def evaluate(self):
+    name = "eval"
+    self._set_eval_dir_name("eval")
     return self._estimator.evaluate(
         self._eval_spec.input_fn,
         steps=self._eval_spec.steps,
-        hooks=self._eval_spec.hooks)
+        hooks=self._eval_spec.hooks,
+        name=name)
 
   def evaluate_on_train_data(self):
+    name = "eval_train"
+    self._set_eval_dir_name(name)
     self._estimator.evaluate(
         self._train_spec.input_fn,
         steps=self._eval_spec.steps,
         hooks=self._eval_spec.hooks,
-        name="eval_train")
+        name=name)
 
   def continuous_eval(self):
     """Evaluate until checkpoints stop being produced."""
-    for _ in next_checkpoint(self._hparams.model_dir):
+    for _ in next_checkpoint(self._hparams.model_dir,
+                             self._hparams.eval_timeout_mins):
       self.evaluate()
 
   def continuous_eval_on_train_data(self):
     """Evaluate on train data until checkpoints stop being produced."""
-    for _ in next_checkpoint(self._hparams.model_dir):
+    for _ in next_checkpoint(self._hparams.model_dir,
+                             self._hparams.eval_timeout_mins):
       self.evaluate_on_train_data()
 
   def test(self):
-    """Perform 1 step of train and 2 step of eval."""
+    """Perform 1 train step and 1 eval step."""
     if self._use_validation_monitor:
       return self.train_and_evaluate()
 
@@ -570,7 +597,7 @@ class T2TExperiment(object):
 
   def continuous_decode_on_eval_data(self):
     """Decode from dataset on new checkpoint."""
-    if self._decode_hparams.mlperf_mode:
+    if self._hparams.mlperf_mode:
       ckpt_generator = next_undecoded_checkpoint(self._hparams.model_dir)
     else:
       ckpt_generator = next_checkpoint(self._hparams.model_dir)
@@ -583,7 +610,7 @@ class T2TExperiment(object):
         continue
       # Decode the latest checkpoint by default.
       checkpoint_path = None
-      if self._decode_hparams.mlperf_mode:
+      if self._hparams.mlperf_mode:
         self._decode_hparams.mlperf_decode_step = current_step
         checkpoint_path = ckpt
 
@@ -592,13 +619,13 @@ class T2TExperiment(object):
           dataset_split=tf.estimator.ModeKeys.EVAL,
           checkpoint_path=checkpoint_path)
       d_hparams = self._decode_hparams
-      if d_hparams.mlperf_mode and d_hparams.mlperf_success:
+      if self._hparams.mlperf_mode and d_hparams.mlperf_success:
         mlperf_log.transformer_print(
             key=mlperf_log.RUN_STOP, value={"success": "true"})
         break
 
     d_hparams = self._decode_hparams
-    if d_hparams.mlperf_mode and not d_hparams.mlperf_success:
+    if self._hparams.mlperf_mode and not d_hparams.mlperf_success:
       mlperf_log.transformer_print(
           key=mlperf_log.RUN_STOP, value={"success": "false"})
 
@@ -627,6 +654,7 @@ def create_experiment(
     eval_early_stopping_metric=None,
     eval_early_stopping_metric_delta=None,
     eval_early_stopping_metric_minimize=True,
+    eval_timeout_mins=240,
     use_tpu=False,
     use_tpu_estimator=False,
     use_xla=False,
@@ -647,6 +675,7 @@ def create_experiment(
   hparams.add_hparam("warm_start_from", warm_start_from)
   hparams.add_hparam("std_server_protocol", std_server_protocol)
   hparams.add_hparam("eval_freq_in_steps", min_eval_frequency)
+  hparams.add_hparam("eval_timeout_mins", eval_timeout_mins)
   if decode_hparams is not None:
     decode_hparams.add_hparam("decode_from_file", decode_from_file)
     decode_hparams.add_hparam("decode_to_file", decode_to_file)

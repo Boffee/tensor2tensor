@@ -25,6 +25,7 @@ from tensor2tensor.data_generators import problem
 from tensor2tensor.data_generators import text_encoder
 from tensor2tensor.data_generators import text_problems
 from tensor2tensor.data_generators import translate
+from tensor2tensor.data_generators import wiki_lm
 from tensor2tensor.utils import registry
 
 import tensorflow as tf
@@ -154,6 +155,10 @@ class TranslateEnfrWmt32kWithBacktranslateFr(TranslateEnfrWmt32k):
     return True
 
   @property
+  def skip_random_fraction_when_training(self):
+    return False
+
+  @property
   def backtranslate_data_filenames(self):
     """List of pairs of files with matched back-translated data."""
     # Files must be placed in tmp_dir, each similar size to authentic data.
@@ -175,12 +180,10 @@ class TranslateEnfrWmt32kWithBacktranslateFr(TranslateEnfrWmt32k):
     tag = "train" if dataset_split == problem.DatasetSplit.TRAIN else "dev"
     data_path = translate.compile_data(
         tmp_dir, datasets, "%s-compiled-%s" % (self.name, tag))
-    # Iterator over authentic data.
-    it_auth = text_problems.text2text_txt_iterator(
-        data_path + ".lang1", data_path + ".lang2")
     # For eval, use authentic data.
     if dataset_split != problem.DatasetSplit.TRAIN:
-      for example in it_auth:
+      for example in text_problems.text2text_txt_iterator(
+          data_path + ".lang1", data_path + ".lang2"):
         yield example
     else:  # For training, mix synthetic and authentic data as follows.
       for (file1, file2) in self.backtranslate_data_filenames:
@@ -190,7 +193,8 @@ class TranslateEnfrWmt32kWithBacktranslateFr(TranslateEnfrWmt32k):
         for example in text_problems.text2text_txt_iterator(path1, path2):
           yield example
         # Now authentic data.
-        for example in it_auth:
+        for example in text_problems.text2text_txt_iterator(
+            data_path + ".lang1", data_path + ".lang2"):
           yield example
 
 
@@ -233,3 +237,16 @@ class TranslateEnfrWmtCharacters(TranslateEnfrWmtSmallCharacters):
   @property
   def use_small_dataset(self):
     return False
+
+
+@registry.register_problem
+class TranslateEnfrWmtMulti64k(TranslateEnfrWmtSmall32k):
+  """Translation with muli-lingual vocabulary."""
+
+  @property
+  def use_small_dataset(self):
+    return False
+
+  @property
+  def vocab_filename(self):
+    return wiki_lm.LanguagemodelDeEnFrRoWiki64k().vocab_filename
