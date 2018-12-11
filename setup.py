@@ -41,7 +41,7 @@ setup(
         'gunicorn',
         'gym',
         'h5py',
-        'mesh-tensorflow',
+        'mesh-tensorflow==0.0.5',
         'numpy',
         'oauth2client',
         'opencv-python',
