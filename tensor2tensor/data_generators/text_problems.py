@@ -33,6 +33,7 @@ import re
 import warnings
 import xml.etree.ElementTree as ET
 import tempfile
+import six
 
 from tensor2tensor.data_generators import generator_utils
 from tensor2tensor.data_generators import problem
@@ -654,6 +655,34 @@ def text2text_generate_encoded(sample_generator,
     sample["targets"] = targets_vocab.encode(sample["targets"])
     sample["targets"].append(text_encoder.EOS_ID)
     yield sample
+
+
+def text2self_prefix_iterator(txt_prefix):
+  txt_paths = tf.gfile.Glob(txt_prefix + '*')
+  for txt_path in txt_paths:
+    for example in text2self_txt_iterator(txt_path):
+      yield example
+
+
+def text2text_prefix_iterator(source_txt_prefix, target_txt_prefix):
+  """Yield dicts for Text2TextProblem.generate_samples from lines of files."""
+  source_txt_paths = tf.gfile.Glob(source_txt_prefix + '*')
+  target_txt_paths = tf.gfile.Glob(target_txt_prefix + '*')
+  source_suffix2paths = dict(
+      six.moves.map(lambda path: (path.replace(source_txt_prefix, ''), path),
+                    source_txt_paths))
+  target_suffix2paths = dict(
+      six.moves.map(lambda path: (path.replace(target_txt_prefix, ''), path),
+                    target_txt_paths))
+  source_target_txt_paths = [
+      (source_suffix2paths[suffix], target_suffix2paths[suffix])
+      for suffix in set(six.iterkeys(target_suffix2paths)) & set(
+          six.iterkeys(source_suffix2paths))
+  ]
+
+  for source_txt_path, target_txt_path, in source_target_txt_paths:
+    for example in text2text_txt_iterator(source_txt_path, target_txt_path):
+      yield example
 
 
 def tmx_iterator(tmx_path, source_lang, target_lang):
