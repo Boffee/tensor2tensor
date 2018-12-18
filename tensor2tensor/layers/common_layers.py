@@ -2828,6 +2828,41 @@ def sample_with_temperature(logits, temperature):
     return choices
 
 
+def sample_topk_with_temperature(logits, temperature, k):
+  """Argmax, random, or top k random sampling.
+
+  Args:
+    logits: a Tensor.
+    temperature: a float  0.0=argmax 1.0=random
+    k: top k logits to sample form
+
+  Returns:
+    a Tensor with one fewer dimension than logits.
+  """
+  if temperature == 0.0 or k == 0:
+    return sample_with_temperature(logits, temperature)
+  else:
+    logits_shape = shape_list(logits)
+    depth = logits_shape[-1]
+    k = tf.minimum(depth, k)
+    topk_logits, topk_ids = tf.nn.top_k(logits, k=k, sorted=True)
+    if temperature > 1.0:
+      top_ids = tf.slice(topk_ids, tf.zeros_like(logits_shape),
+                         tf.concat([logits_shape[:-1], [1]], axis=-1))
+      weight = (
+          tf.log(tf.cast(depth - top_ids, topk_logits.dtype)) / tf.log(
+              tf.cast(depth, topk_logits.dtype)))
+      temp = 1 + (temperature - 1) * weight
+      topk_logits /= temp
+      temperature = 1.0
+    sample_indices = sample_with_temperature(topk_logits, temperature)
+    choices = tf.reduce_sum(
+        tf.cast(topk_ids, sample_indices.dtype) *
+        tf.one_hot(sample_indices, k, dtype=sample_indices.dtype),
+        axis=-1)
+    return choices
+
+
 def ones_matrix_band_part(rows, cols, num_lower, num_upper, out_shape=None):
   """Matrix band part of ones.
 

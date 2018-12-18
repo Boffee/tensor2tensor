@@ -1000,7 +1000,8 @@ def fast_decode(encoder_output,
       log_probs = common_layers.log_prob_from_logits(logits)
       temperature = (0.0 if hparams.sampling_method == "argmax" else
                      hparams.sampling_temp)
-      next_id = common_layers.sample_with_temperature(logits, temperature)
+      next_id = common_layers.sample_topk_with_temperature(
+          logits, temperature, hparams.sampling_k)
       hit_eos |= tf.equal(next_id, eos_id)
 
       log_prob_indices = tf.stack(
