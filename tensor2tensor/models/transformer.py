@@ -1919,6 +1919,14 @@ def transformer_tiny_enfr():
 
 
 @registry.register_hparams
+def transformer_base_enfr_multistep8():
+  hparams = transformer_base_enfr()
+  hparams.optimizer = "MultistepAdam"
+  hparams.optimizer_multistep_accumulate_steps = 8
+  return hparams
+
+
+@registry.register_hparams
 def transformer_big_enfr_tpu():
   hparams = transformer_big_enfr()
   # For performance, use fewer heads so that matrix dimensions are at least 128
