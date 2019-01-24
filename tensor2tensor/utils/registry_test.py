@@ -87,19 +87,6 @@ class ModelRegistryTest(tf.test.TestCase):
 
     self.assertSetEqual(set(["m1", "m2"]), set(registry.list_models()))
 
-  def testSnakeCase(self):
-    convert = registry._convert_camel_to_snake
-
-    self.assertEqual("typical_camel_case", convert("TypicalCamelCase"))
-    self.assertEqual("numbers_fuse2gether", convert("NumbersFuse2gether"))
-    self.assertEqual("numbers_fuse2_gether", convert("NumbersFuse2Gether"))
-    self.assertEqual("lstm_seq2_seq", convert("LSTMSeq2Seq"))
-    self.assertEqual("starts_lower", convert("startsLower"))
-    self.assertEqual("starts_lower_caps", convert("startsLowerCAPS"))
-    self.assertEqual("caps_fuse_together", convert("CapsFUSETogether"))
-    self.assertEqual("startscap", convert("Startscap"))
-    self.assertEqual("s_tartscap", convert("STartscap"))
-
 
 class HParamRegistryTest(tf.test.TestCase):
 
@@ -207,8 +194,35 @@ class HParamRegistryTest(tf.test.TestCase):
         pass
 
 
+class CreateRegistry(tf.test.TestCase):
+  """Test class for `create_registry`."""
+
+  def testCreateRegistry(self):
+    my_registry = registry.create_registry("test_reg1")
+    self.assertIs(my_registry, registry.registry("test_reg1"))
+
+    # Use as decorator on a fn
+    @my_registry.register("foo")
+    def some_fn(num):
+      return num + 2
+
+    # Register a regular object
+    pod_obj = 4
+    my_registry.register("bar")(pod_obj)
+
+    # Register a class
+    @my_registry.register("foobar")
+    class A(object):
+      pass
+
+    self.assertEqual(9, my_registry.get("foo")(7))
+    self.assertEqual(["bar", "foo", "foobar"], my_registry.list())
+    foobar = my_registry.get("foobar")
+    self.assertTrue(isinstance(foobar(), A))
+
+
 class RegistryTest(tf.test.TestCase):
-  """ Test class for common functions."""
+  """Test class for common functions."""
 
   def testRegistryHelp(self):
     help_str = registry.help_string()

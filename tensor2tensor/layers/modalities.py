@@ -93,7 +93,7 @@ class SymbolModality(modality.Modality):
     else:
       ret = tf.concat(shards, 0)
     # Convert ret to tensor.
-    if not tf.contrib.eager.in_eager_mode():
+    if not tf.executing_eagerly():
       ret = common_layers.convert_gradient_to_tensor(ret)
     return ret
 
@@ -111,7 +111,8 @@ class SymbolModality(modality.Modality):
       ret = common_layers.gather(var, x)
       if self._model_hparams.multiply_embedding_mode == "sqrt_depth":
         ret *= self._body_input_depth**0.5
-      ret *= tf.expand_dims(tf.to_float(tf.not_equal(x, 0)), -1)
+      ret *= tf.expand_dims(
+          common_layers.cast_like(tf.not_equal(x, 0), ret), -1)
       return ret
 
   def bottom(self, x):
@@ -148,7 +149,6 @@ class SymbolModality(modality.Modality):
     else:
       scope_name = "softmax"
       reuse = False
-
     with tf.variable_scope(scope_name, reuse=reuse):
       body_output_shape = common_layers.shape_list(body_output)
       var = self._get_weights(body_output_shape[-1])
@@ -226,7 +226,7 @@ class ImageModality(modality.Modality):
 
   def bottom(self, x):
     with tf.variable_scope(self.name):
-      if not tf.contrib.eager.in_eager_mode():
+      if not tf.executing_eagerly():
         tf.summary.image(
             "inputs", common_layers.tpu_safe_image_summary(x), max_outputs=2)
       return tf.to_float(x)
@@ -234,7 +234,7 @@ class ImageModality(modality.Modality):
   def targets_bottom(self, x):
     inputs = x
     with tf.variable_scope(self.name):
-      if not tf.contrib.eager.in_eager_mode():
+      if not tf.executing_eagerly():
         tf.summary.image(
             "targets_bottom",
             common_layers.tpu_safe_image_summary(inputs),
@@ -790,12 +790,11 @@ class ClassLabelModality(modality.Modality):
 
   def bottom(self, x):
     with tf.variable_scope(self.name):
+      multiplier = 1.0
+      if self._model_hparams.multiply_embedding_mode == "sqrt_depth":
+        multiplier = self._body_input_depth**0.5
       return common_layers.embedding(
-          x,
-          self._vocab_size,
-          self._body_input_depth,
-          multiplier=self._body_input_depth**0.5 if
-          self._model_hparams.multiply_embedding_mode == "sqrt_depth" else 1.0)
+          x, self._vocab_size, self._body_input_depth, multiplier=multiplier)
 
   def targets_bottom(self, x):
     with tf.variable_scope(self.name):
@@ -825,12 +824,10 @@ class VideoModalityIdentity(VideoModality):
 
   def bottom(self, x):
     common_video.gif_summary("inputs", x, max_outputs=1)
-    x = common_layers.standardize_images(x)
     return x
 
   def targets_bottom(self, x):
     common_video.gif_summary("targets", x, max_outputs=1)
-    x = common_layers.standardize_images(x)
     return x
 
   def top(self, body_output, targets):

@@ -54,6 +54,12 @@ class MtfUnitransformer(mtf_model.MtfModel):
           mtf.Dimension("inner_batch",
                         hparams.batch_size // hparams.outer_batch_size)]
 
+  def combine_batch_dims(self, x):
+    if len(self.batch_dims) <= 1:
+      return x
+    return mtf.replace_dimensions(
+        x, self.batch_dims, mtf.combined_dimension(self.batch_dims))
+
   @property
   def autoregressive(self):
     return self._hparams.autoregressive
@@ -90,9 +96,11 @@ class MtfUnitransformer(mtf_model.MtfModel):
       return None
     x = tf.to_int32(features[key])
     x = common_layers.expand_squeeze_to_nd(x, 2)
+    batch_size = mtf.Shape(self.batch_dims).size
     # pad to length
     extra_length = self.length_dim.size - tf.shape(x)[1]
-    x = tf.pad(x, [[0, 0], [0, extra_length]])
+    extra_batch = batch_size - tf.shape(x)[0]
+    x = tf.pad(x, [[0, extra_batch], [0, extra_length]])
     mtf_shape = mtf.Shape(self.batch_dims + [self.length_dim])
     x = tf.reshape(x, mtf_shape.to_integer_list)
     return mtf.import_fully_replicated(mesh, x, mtf_shape, name=key)
@@ -107,7 +115,7 @@ class MtfUnitransformer(mtf_model.MtfModel):
       layer_stack = hparams.layer_stack
     else:
       # hparams.layer_stack is a function for creating a LayerStack
-      layer_stack = hparams.layer_stack(hparams)
+      layer_stack = hparams.layer_stack(hparams, "")
     if self.autoregressive:
       input_vocab_size = self._targets_vocab_size
     else:
@@ -119,7 +127,11 @@ class MtfUnitransformer(mtf_model.MtfModel):
         output_vocab_size=self._targets_vocab_size,
         autoregressive=self.autoregressive,
         max_length=hparams.max_length,
-        z_loss=hparams.z_loss)
+        shared_embedding_and_softmax_weights=(
+            hparams.shared_embedding_and_softmax_weights),
+        z_loss=hparams.z_loss,
+        layout=hparams.layout,
+        mesh_shape=hparams.mesh_shape)
 
   def _mtf_model_fn(self, features, mesh):
     self._original_features = features
@@ -147,11 +159,7 @@ class MtfUnitransformer(mtf_model.MtfModel):
   def mtf_model_fn(self, features, mesh):
     logits, loss = self._mtf_model_fn(features, mesh)
     # combine batch dims
-    if len(self.batch_dims) > 1:
-      combined_batch_dim = mtf.Dimension(
-          self.batch_dims[0].name, mtf.Shape(self.batch_dims).size)
-      logits = mtf.reshape(
-          logits, [combined_batch_dim] + logits.shape.dims[-2:])
+    logits = self.combine_batch_dims(logits)
     return logits, loss
 
   @property
@@ -181,16 +189,20 @@ class MtfUnitransformer(mtf_model.MtfModel):
       partial_targets = import_feature("inputs")
       if partial_targets is None:
         partial_targets = import_feature("targets")
-      if partial_targets is None:
+      if partial_targets:
+        partial_targets *= mtf.cast(
+            mtf.not_equal(partial_targets, 1), partial_targets.dtype)
+      else:
         ids_shape = mtf.Shape(self.batch_dims + [self.length_dim])
         partial_targets = mtf.constant(mesh, 0, ids_shape, dtype=tf.int32)
       if hparams.beam_size > 1:
         raise NotImplementedError(
             "Beam search not implemented for unitransformer.")
-      return model.sample_autoregressive(
+      ret = model.sample_autoregressive(
           partial_targets,
           temperature=hparams.sampling_temp,
           variable_dtype=self.variable_dtype)
+      return self.combine_batch_dims(ret)
     else:
       raise ValueError(
           "Don't know how to sample from non-autoregressive unitransformer")
@@ -205,11 +217,11 @@ class MtfBitransformer(MtfUnitransformer):
     if isinstance(hparams.encoder_layer_stack, transformer.LayerStack):
       encoder_layer_stack = hparams.encoder_layer_stack
     else:
-      encoder_layer_stack = hparams.encoder_layer_stack(hparams)
+      encoder_layer_stack = hparams.encoder_layer_stack(hparams, "encoder_")
     if isinstance(hparams.decoder_layer_stack, transformer.LayerStack):
       decoder_layer_stack = hparams.decoder_layer_stack
     else:
-      decoder_layer_stack = hparams.decoder_layer_stack(hparams)
+      decoder_layer_stack = hparams.decoder_layer_stack(hparams, "decoder_")
     return transformer.Bitransformer(
         encoder_layer_stack=encoder_layer_stack,
         decoder_layer_stack=decoder_layer_stack,
@@ -219,8 +231,12 @@ class MtfBitransformer(MtfUnitransformer):
         output_vocab_size=self._targets_vocab_size,
         max_length=hparams.max_length,
         shared_embedding=hparams.shared_embedding,
+        shared_embedding_and_softmax_weights=(
+            hparams.shared_embedding_and_softmax_weights),
         label_smoothing=hparams.label_smoothing,
-        z_loss=hparams.z_loss)
+        z_loss=hparams.z_loss,
+        layout=hparams.layout,
+        mesh_shape=hparams.mesh_shape)
 
   def _mtf_model_fn(self, features, mesh):
     self._original_features = features
@@ -229,6 +245,8 @@ class MtfBitransformer(MtfUnitransformer):
       return self._import_feature(features, mesh, key)
     targets = import_feature("targets")
     inputs = import_feature("inputs")
+    if not inputs:
+      raise ValueError("inputs feature is missing")
     encoder_sequence_id = import_feature("inputs_segmentation")
     if not encoder_sequence_id:
       encoder_sequence_id = mtf.to_int32(mtf.not_equal(inputs, 0))
@@ -250,7 +268,7 @@ class MtfBitransformer(MtfUnitransformer):
     hparams = self._hparams
     model = self.model()
     inputs = self._import_feature(features, mesh, "inputs")
-    return model.decode(
+    ret = model.decode(
         inputs,
         self.variable_dtype,
         beam_size=hparams.beam_size,
@@ -258,36 +276,70 @@ class MtfBitransformer(MtfUnitransformer):
         temperature=hparams.sampling_temp if hparams.beam_size == 1 else 0,
         decode_length_multiplier=hparams.decode_length_multiplier,
         decode_length_constant=hparams.decode_length_constant)
+    return self.combine_batch_dims(ret)
 
 
-def default_layer_stack(hparams):
+# The following functions construct layers based on hyperparmeters
+def attention_kwargs_from_hparams(hparams):
+  return {
+      "dropout_rate": hparams.attention_dropout,
+      "extra_logit": 0.0 if hparams.extra_logit else None,
+  }
+
+
+def self_attention_from_hparams(hparams, prefix):
+  """Create self-attention layer based on hyperparameters."""
+  radius = hparams.get(prefix + "local_attention_radius")
+  if radius:
+    return transformer_layers.LocalSelfAttention(
+        num_heads=hparams.get(prefix + "num_heads"),
+        num_memory_heads=hparams.get(prefix + "num_memory_heads", 0),
+        radius=radius,
+        key_value_size=hparams.d_kv,
+        shared_kv=hparams.get(prefix + "shared_kv", False),
+        attention_kwargs=attention_kwargs_from_hparams(hparams))
+  else:
+    return transformer_layers.SelfAttention(
+        num_heads=hparams.get(prefix + "num_heads"),
+        num_memory_heads=hparams.get(prefix + "num_memory_heads", 0),
+        key_value_size=hparams.d_kv,
+        shared_kv=hparams.get(prefix + "shared_kv", False),
+        attention_kwargs=attention_kwargs_from_hparams(hparams))
+
+
+def enc_dec_attention_from_hparams(hparams, prefix):
+  return transformer_layers.EncDecAttention(
+      num_heads=hparams.get(prefix + "num_heads"),
+      num_memory_heads=hparams.get(prefix + "num_memory_heads", 0),
+      key_value_size=hparams.d_kv,
+      shared_kv=hparams.get(prefix + "shared_kv", False),
+      attention_kwargs=attention_kwargs_from_hparams(hparams))
+
+
+def dense_relu_dense_from_hparams(hparams):
+  return transformer_layers.DenseReluDense(
+      hidden_size=hparams.d_ff,
+      dropout_rate=hparams.relu_dropout)
+
+
+def layer_stack_from_hparams(hparams, prefix):
+  """Create a layer stack based on the hyperparameter values."""
   return transformer.LayerStack(
-      [transformer_layers.SelfAttention(
-          num_heads=hparams.num_heads,
-          key_value_size=hparams.d_kv,
-          dropout_rate=hparams.attention_dropout),
-       transformer_layers.DenseReluDense(
-           hidden_size=hparams.d_ff,
-           dropout_rate=hparams.relu_dropout),
-      ] * hparams.num_hidden_layers,
+      [self_attention_from_hparams(hparams, prefix),
+       dense_relu_dense_from_hparams(hparams)
+      ] * hparams.get(prefix + "num_layers"),
       dropout_rate=hparams.layer_prepostprocess_dropout,
       norm_epsilon=hparams.norm_epsilon)
 
 
-def default_layer_stack_with_encoder_attention(hparams):
+def decoder_layer_stack_from_hparams(hparams, prefix):
+  if prefix != "decoder_":
+    raise ValueError("prefix should be 'decoder'")
   return transformer.LayerStack(
-      [transformer_layers.SelfAttention(
-          num_heads=hparams.num_heads,
-          key_value_size=hparams.d_kv,
-          dropout_rate=hparams.attention_dropout),
-       transformer_layers.EncDecAttention(
-           num_heads=hparams.num_heads,
-           key_value_size=hparams.d_kv,
-           dropout_rate=hparams.attention_dropout),
-       transformer_layers.DenseReluDense(
-           hidden_size=hparams.d_ff,
-           dropout_rate=hparams.relu_dropout),
-      ] * hparams.num_hidden_layers,
+      [self_attention_from_hparams(hparams, prefix),
+       enc_dec_attention_from_hparams(hparams, prefix),
+       dense_relu_dense_from_hparams(hparams)
+      ] * hparams.get(prefix + "num_layers"),
       dropout_rate=hparams.layer_prepostprocess_dropout,
       norm_epsilon=hparams.norm_epsilon)
 
@@ -304,14 +356,17 @@ def mtf_transformer2_base():
   # with bfloat16 activations.
   hparams.add_hparam("z_loss", 1e-4)
 
-  # These hyperparameters are used in default_layer_stack()
+  # These hyperparameters are used in layer_stack_from_hparams()
   # They may not be respected if hparams uses a differet layer stack function.
   hparams.num_hidden_layers = 6
   hparams.add_hparam("d_ff", 2048)
   hparams.add_hparam("d_kv", 128)
   hparams.add_hparam("attention_dropout", 0.0)
   hparams.add_hparam("relu_dropout", 0.0)
+  hparams.del_hparam("num_heads")
+  hparams.del_hparam("num_hidden_layers")
   hparams.layer_prepostprocess_dropout = 0.0
+  hparams.add_hparam("extra_logit", False)
 
   # round up vocab sizes to be a multiple of this value
   hparams.vocab_divisor = 128
@@ -353,9 +408,21 @@ def mtf_transformer2_base():
 
 @registry.register_hparams
 def mtf_unitransformer_base():
+  """Hyperparameters for single-stack Transformer."""
   hparams = mtf_transformer2_base()
   hparams.add_hparam("autoregressive", True)
-  hparams.layer_stack = default_layer_stack
+  hparams.layer_stack = layer_stack_from_hparams
+  # HYPERPARAMETERS FOR THE SINGLE LAYER STACK
+  hparams.add_hparam("num_layers", 6)
+  # number of heads in multihead attention
+  hparams.add_hparam("num_heads", 8)
+  # default of 0 for standard transformer behavior
+  # 1 means a single set of keys and values that are read by all query heads
+  hparams.add_hparam("num_memory_heads", 0)
+  # share attention keys and values
+  hparams.add_hparam("shared_kv", False)
+  # if nonzero then use local attention
+  hparams.add_hparam("local_attention_radius", 0)
   return hparams
 
 
@@ -365,14 +432,32 @@ def mtf_bitransformer_base():
   hparams = mtf_transformer2_base()
   hparams.max_length = 256
   hparams.shared_embedding = True
-  hparams.encoder_layer_stack = default_layer_stack
-  hparams.decoder_layer_stack = default_layer_stack_with_encoder_attention
+  hparams.encoder_layer_stack = layer_stack_from_hparams
+  hparams.decoder_layer_stack = decoder_layer_stack_from_hparams
+  # HYPERPARAMETERS FOR THE LAYER STACKS
+  hparams.add_hparam("encoder_num_layers", 6)
+  hparams.add_hparam("decoder_num_layers", 6)
+  # number of heads in multihead attention
+  hparams.add_hparam("encoder_num_heads", 8)
+  hparams.add_hparam("decoder_num_heads", 8)
+  # default of 0 for standard transformer behavior
+  # 1 means a single set of keys and values that are read by all query heads
+  hparams.add_hparam("encoder_num_memory_heads", 0)
+  hparams.add_hparam("decoder_num_memory_heads", 0)
+  # share attention keys and values
+  hparams.add_hparam("encoder_shared_kv", False)
+  hparams.add_hparam("decoder_shared_kv", False)
+  # if nonzero then use local attention
+  hparams.add_hparam("encoder_local_attention_radius", 0)
+  hparams.add_hparam("decoder_local_attention_radius", 0)
+
   # Parameters for computing the maximum decode length in beam search.
   # Maximum decode length is:
   #    min(max_length,
   #        decode_length_multiplier * input_length + decode_length_constant)
   hparams.add_hparam("decode_length_multiplier", 1.5)
   hparams.add_hparam("decode_length_constant", 10.0)
+  hparams.sampling_temp = 0.0
   return hparams
 
 
@@ -451,6 +536,14 @@ def mtr_lm_dense_0():
 
 
 @registry.register_hparams
+def mtr_lm_dense_0_h1_16():
+  hparams = mtr_lm_dense_0()
+  hparams.decoder_num_heads = 16
+  hparams.decoder_num_memory_heads = 1
+  return hparams
+
+
+@registry.register_hparams
 def mtr_lm_dense_1():
   return mtr_lm_dense(1)
 
@@ -470,20 +563,27 @@ def mtr_lm_dense_3():
 
 
 @registry.register_hparams
-def mtr_lm_v1():
+def mtr_lm_v1(num_heads=8, num_memory_heads=0):
   """Model incorporating mixture-of-experts, local and global attention.
 
   ~6B parameters
 
   32 experts in 3 hierarchichal moe layers.
 
+  Args:
+    num_heads: an optional integer
+    num_memory_heads: an optional integer
+
   Returns:
     a hparams
   """
   hparams = mtr_lm_dense(0)
   local_att = transformer_layers.LocalSelfAttention(
-      num_heads=4, key_value_size=128)
-  att = transformer_layers.SelfAttention(num_heads=4, key_value_size=128)
+      num_heads=num_heads, num_memory_heads=num_memory_heads,
+      key_value_size=128)
+  att = transformer_layers.SelfAttention(
+      num_heads=num_heads, num_memory_heads=num_memory_heads,
+      key_value_size=128)
   drd = transformer_layers.DenseReluDense(hidden_size=2048)
   hmoe = moe.MoE2D(expert_x=8, expert_y=4, hidden_size=32768)
   hparams.layer_stack = transformer.LayerStack(
@@ -496,6 +596,11 @@ def mtr_lm_v1():
 
 
 @registry.register_hparams
+def mtr_lm_v1_h1_8():
+  """Version for fast decoding."""
+  return mtr_lm_v1(num_heads=8, num_memory_heads=1)
+
+
 def mtr_tr_dense(sz):
   """Series of machine translation models.
 
@@ -519,11 +624,12 @@ def mtr_tr_dense(sz):
   hparams.num_hidden_layers = 6
   hparams.d_ff = int(4096 * n)
   hparams.d_kv = 128
-  hparams.num_heads = int(8 * n)
+  hparams.encoder_num_heads = int(8 * n)
+  hparams.decoder_num_heads = int(8 * n)
   # one epoch for translate_enfr_wmt32k_packed = 51400 steps
   hparams.learning_rate_decay_steps = 51400
   hparams.layout = "batch:batch;vocab:model;d_ff:model;heads:model"
-  hparams.mesh_shape = "model:4;batch:8"
+  hparams.mesh_shape = "batch:32"
   hparams.label_smoothing = 0.1
   hparams.layer_prepostprocess_dropout = 0.1
   hparams.attention_dropout = 0.1
@@ -543,16 +649,165 @@ def mtr_tr_dense_1():
 
 @registry.register_hparams
 def mtr_tr_dense_2():
-  return mtr_tr_dense(2)
+  hparams = mtr_tr_dense(2)
+  hparams.mesh_shape = "model:4;batch:8"
+  return hparams
 
 
 @registry.register_hparams
 def mtr_tr_dense_3():
-  return mtr_tr_dense(3)
+  hparams = mtr_tr_dense(3)
+  hparams.mesh_shape = "model:4;batch:8"
+  return hparams
 
 
 @registry.register_hparams
-def mtr_tr_dense_0_short():
-  hparams = mtr_tr_dense(0)
-  hparams.num_hidden_layers = 3
+def mtr_tr_dense_3_88():
+  hparams = mtr_tr_dense(3)
+  hparams.mesh_shape = "model:8;batch:16"
+  return hparams
+
+
+@registry.register_hparams
+def mtr_tr_dense_3_fast():
+  hparams = mtr_tr_dense_3()
+  hparams.decoder_local_attention_radius = 32
+  hparams.decoder_num_heads = 128
+  hparams.decoder_num_memory_heads = 8
+  return hparams
+
+
+def mtr_tr_dense_local(sz):
+  """With local self-attention in the decoder."""
+  hparams = mtr_tr_dense(sz)
+  hparams.decoder_local_attention_radius = 32
+  return hparams
+
+
+@registry.register_hparams
+def mtr_tr_dense_local_0():
+  return mtr_tr_dense_local(0)
+
+
+@registry.register_hparams
+def mtr_tr_dense_local_0_w8():
+  hparams = mtr_tr_dense_local_0()
+  hparams.decoder_local_attention_radius = 8
+  return hparams
+
+
+@registry.register_hparams
+def mtr_tr_dense_local_0_h1_16():
+  hparams = mtr_tr_dense_local_0()
+  hparams.decoder_num_heads = 16
+  hparams.decoder_num_memory_heads = 1
+  return hparams
+
+
+@registry.register_hparams
+def mtr_tr_dense_local_0_h1_16_shared():
+  hparams = mtr_tr_dense_local_0_h1_16()
+  hparams.shared_embedding_and_softmax_weights = True
+  return hparams
+
+
+@registry.register_hparams
+def mtr_tr_dense_local_0_h1_8_kv256():
+  hparams = mtr_tr_dense_local_0()
+  hparams.decoder_num_heads = 8
+  hparams.decoder_num_memory_heads = 1
+  hparams.d_kv = 256
+  return hparams
+
+
+@registry.register_hparams
+def mtr_tr_dense_local_0_h1_16_shared_kv():
+  hparams = mtr_tr_dense_local_0_h1_16()
+  hparams.decoder_shared_kv = True
+  return hparams
+
+
+@registry.register_hparams
+def mtr_tr_dense_0_h4():
+  hparams = mtr_tr_dense_0()
+  hparams.decoder_num_heads = 4
+  return hparams
+
+
+@registry.register_hparams
+def mtr_tr_dense_0_h16():
+  hparams = mtr_tr_dense_0()
+  hparams.decoder_num_heads = 16
+  return hparams
+
+
+@registry.register_hparams
+def mtr_tr_dense_0_extra_logit():
+  hparams = mtr_tr_dense_0()
+  hparams.extra_logit = True
+  return hparams
+
+
+@registry.register_hparams
+def mtr_tr_dense_0_h1_8():
+  hparams = mtr_tr_dense_0()
+  hparams.decoder_num_memory_heads = 1
+  return hparams
+
+
+@registry.register_hparams
+def mtr_tr_dense_0_h1_1():
+  hparams = mtr_tr_dense_0()
+  hparams.decoder_num_heads = 1
+  return hparams
+
+
+@registry.register_hparams
+def mtr_tr_dense_0_h1_16():
+  hparams = mtr_tr_dense_0()
+  hparams.decoder_num_heads = 16
+  hparams.decoder_num_memory_heads = 1
+  return hparams
+
+
+@registry.register_hparams
+def mtr_tr_dense_0_h2_16():
+  hparams = mtr_tr_dense_0()
+  hparams.decoder_num_heads = 16
+  hparams.decoder_num_memory_heads = 2
+  return hparams
+
+
+@registry.register_hparams
+def mtr_tr_dense_0_shared_kv():
+  hparams = mtr_tr_dense_0()
+  hparams.decoder_shared_kv = True
+  return hparams
+
+
+@registry.register_hparams
+def mtr_tr_enfr_v0():
+  # good parameters for wmt-en-fr
+  hparams = mtr_tr_dense_local_0_h1_16()
+  return hparams
+
+
+@registry.register_hparams
+def mtr_tr_ende_v0():
+  # good parameters for wmt-en-de
+  hparams = mtr_tr_dense_local_0_h1_16()
+  hparams.learning_rate_decay_steps = 20000
+  hparams.shared_embedding_and_softmax_weights = True
+  hparams.layer_prepostprocess_dropout = 0.2
+  return hparams
+
+
+@registry.register_hparams
+def mtr_tr_ende_deep():
+  hparams = mtr_tr_ende_v0()
+  hparams.decoder_num_heads = 8
+  hparams.encoder_num_heads = 4
+  hparams.d_ff = 2048
+  hparams.encoder_num_layers = 12
+  hparams.decoder_num_layers = 12
   return hparams

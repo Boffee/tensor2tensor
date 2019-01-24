@@ -25,9 +25,9 @@ import os
 import random
 import numpy as np
 
-from tensor2tensor.data_generators.problem import Problem
 from tensor2tensor.utils import decoding
 from tensor2tensor.utils import devices
+from tensor2tensor.utils import hparams_lib
 from tensor2tensor.utils import metrics_hook
 from tensor2tensor.utils import mlperf_log
 from tensor2tensor.utils import registry
@@ -37,6 +37,10 @@ import tensorflow as tf
 
 from tensorflow.core.protobuf import rewriter_config_pb2
 from tensorflow.python import debug
+
+
+create_hparams = hparams_lib.create_hparams
+add_problem_hparams = hparams_lib.add_problem_hparams
 
 
 def next_checkpoint(model_dir, timeout_mins=240):
@@ -130,49 +134,6 @@ def create_session_config(log_device_placement=False,
       inter_op_parallelism_threads=inter_op_parallelism_threads,
       intra_op_parallelism_threads=intra_op_parallelism_threads)
   return config
-
-
-def create_hparams(hparams_set,
-                   hparams_overrides_str="",
-                   data_dir=None,
-                   problem_name=None,
-                   hparams_path=None):
-  """Create HParams with data_dir and problem hparams, if kwargs provided."""
-  hparams = registry.hparams(hparams_set)
-  if hparams_path and tf.gfile.Exists(hparams_path):
-    hparams = _create_hparams_from_json(hparams_path, hparams)
-  if data_dir:
-    hparams.add_hparam("data_dir", data_dir)
-  if hparams_overrides_str:
-    tf.logging.info("Overriding hparams in %s with %s", hparams_set,
-                    hparams_overrides_str)
-    hparams = hparams.parse(hparams_overrides_str)
-  if problem_name:
-    add_problem_hparams(hparams, problem_name)
-  return hparams
-
-
-def _create_hparams_from_json(json_path, hparams=None):
-  """Loading hparams from json; can also start from hparams if specified."""
-  tf.logging.info("Loading hparams from existing json %s" % json_path)
-  with tf.gfile.Open(json_path, "r") as f:
-    hparams_values = json.load(f)
-    new_hparams = tf.contrib.training.HParams(**hparams_values)
-    # Some keys are in new_hparams but not hparams, so we need to be more
-    #   careful than simply using parse_json() from HParams
-    if hparams:  # hparams specified, so update values from json
-      for key in sorted(new_hparams.values().keys()):
-        if hasattr(hparams, key):  # Overlapped keys
-          value = getattr(hparams, key)
-          new_value = getattr(new_hparams, key)
-          if value != new_value:  # Different values
-            tf.logging.info("Overwrite key %s: %s -> %s" % (
-                key, value, new_value))
-            setattr(hparams, key, new_value)
-    else:
-      hparams = new_hparams
-
-  return hparams
 
 
 def is_cloud_async_distributed():
@@ -527,14 +488,24 @@ class T2TExperiment(object):
 
   def continuous_eval(self):
     """Evaluate until checkpoints stop being produced."""
-    for _ in next_checkpoint(self._hparams.model_dir,
-                             self._hparams.eval_timeout_mins):
+    for ckpt_path in next_checkpoint(self._hparams.model_dir,
+                                     self._hparams.eval_timeout_mins):
+      # Skip zero'th step.
+      train_step = decoding.get_step_from_ckpt_path(ckpt_path)
+      if train_step == 0:
+        tf.logging.info("Skipping evaluation at step 0")
+        continue
       self.evaluate()
 
   def continuous_eval_on_train_data(self):
     """Evaluate on train data until checkpoints stop being produced."""
-    for _ in next_checkpoint(self._hparams.model_dir,
-                             self._hparams.eval_timeout_mins):
+    for ckpt_path in next_checkpoint(self._hparams.model_dir,
+                                     self._hparams.eval_timeout_mins):
+      # Skip zero'th step.
+      train_step = decoding.get_step_from_ckpt_path(ckpt_path)
+      if train_step == 0:
+        tf.logging.info("Skipping evaluation at step 0")
+        continue
       self.evaluate_on_train_data()
 
   def test(self):
@@ -587,23 +558,27 @@ class T2TExperiment(object):
 
   def continuous_decode(self):
     """Decode from dataset on new checkpoint."""
-    for _ in next_checkpoint(self._hparams.model_dir):
+    for _ in next_checkpoint(self._hparams.model_dir,
+                             self._decode_hparams.decode_timeout_mins):
       self.decode()
 
   def continuous_decode_on_train_data(self):
     """Decode from dataset on new checkpoint."""
-    for _ in next_checkpoint(self._hparams.model_dir):
+    for _ in next_checkpoint(self._hparams.model_dir,
+                             self._decode_hparams.decode_timeout_mins):
       self.decode(dataset_split=tf.estimator.ModeKeys.TRAIN)
 
   def continuous_decode_on_eval_data(self):
     """Decode from dataset on new checkpoint."""
     if self._hparams.mlperf_mode:
-      ckpt_generator = next_undecoded_checkpoint(self._hparams.model_dir)
+      ckpt_generator = next_undecoded_checkpoint(
+          self._hparams.model_dir, self._decode_hparams.decode_timeout_mins)
     else:
-      ckpt_generator = next_checkpoint(self._hparams.model_dir)
+      ckpt_generator = next_checkpoint(self._hparams.model_dir,
+                                       self._decode_hparams.decode_timeout_mins)
 
     for ckpt in ckpt_generator:
-      current_step = int(os.path.basename(ckpt).split("-")[1])
+      current_step = decoding.get_step_from_ckpt_path(ckpt)
       tf.logging.info("Decoding step %d" % current_step)
       # Skip checkpoint 0.
       if current_step == 0:
@@ -631,7 +606,8 @@ class T2TExperiment(object):
 
   def continuous_decode_from_file(self):
     """Decode from file on new checkpoint."""
-    for _ in next_checkpoint(self._hparams.model_dir):
+    for _ in next_checkpoint(self._hparams.model_dir,
+                             self._decode_hparams.decode_timeout_mins):
       self.decode(decode_from_file=True)
 
 
@@ -655,6 +631,7 @@ def create_experiment(
     eval_early_stopping_metric_delta=None,
     eval_early_stopping_metric_minimize=True,
     eval_timeout_mins=240,
+    eval_use_test_set=False,
     use_tpu=False,
     use_tpu_estimator=False,
     use_xla=False,
@@ -697,8 +674,12 @@ def create_experiment(
   problem = hparams.problem
   train_input_fn = problem.make_estimator_input_fn(tf.estimator.ModeKeys.TRAIN,
                                                    hparams)
+
+  dataset_split = "test" if eval_use_test_set else None
+  dataset_kwargs = {"dataset_split": dataset_split}
   eval_input_fn = problem.make_estimator_input_fn(tf.estimator.ModeKeys.EVAL,
-                                                  hparams)
+                                                  hparams,
+                                                  dataset_kwargs=dataset_kwargs)
 
   # Export
   exporter = None
@@ -789,17 +770,6 @@ def create_experiment_fn(*args, **kwargs):
     return create_experiment(run_config, hparams, *args, **kwargs)
 
   return experiment_fn
-
-
-def add_problem_hparams(hparams, problem_name_or_instance):
-  """Add problem hparams for the problems."""
-  if isinstance(problem_name_or_instance, Problem):
-    problem = problem_name_or_instance
-  else:
-    problem = registry.problem(problem_name_or_instance)
-  p_hparams = problem.get_hparams(hparams)
-  hparams.problem = problem
-  hparams.problem_hparams = p_hparams
 
 
 def set_random_seed(seed):

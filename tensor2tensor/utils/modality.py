@@ -18,8 +18,9 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-import re
+from tensor2tensor.layers import common_attention
 from tensor2tensor.layers import common_layers
+from tensor2tensor.utils import misc_utils
 
 import tensorflow as tf
 
@@ -58,8 +59,7 @@ class Modality(object):
 
   @property
   def name(self):
-    camelcase_name = type(self).__name__  # DeCamelCase for TF readability.
-    return re.sub("([A-Z]+)", r"_\1", camelcase_name).lower()[1:]
+    return misc_utils.camelcase_to_snakecase(type(self).__name__)
 
   @property
   def top_dimensionality(self):
@@ -182,6 +182,7 @@ class Modality(object):
     logits = top_out
     if weights_fn is None:
       weights_fn = self.targets_weights_fn
+    logits = common_attention.maybe_upcast(logits, hparams=self._model_hparams)
     return common_layers.padded_cross_entropy(
         logits,
         targets,
