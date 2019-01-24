@@ -1166,7 +1166,7 @@ class SentencePieceEncoder(TextEncoder):
                             data_filepaths,
                             max_subtoken_length=15,
                             character_coverage=0.999999,
-                            input_sentence_size=100000000,
+                            input_sentence_size=10000000,
                             seed_sentencepiece_size=10000000,
                             reserved_tokens=None,
                             greedy_encode=False):
