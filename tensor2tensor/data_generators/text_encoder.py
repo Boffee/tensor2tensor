@@ -1169,9 +1169,7 @@ class SentencePieceEncoder(TextEncoder):
                             max_subtoken_length=15,
                             character_coverage=0.999999,
                             input_sentence_size=100000000,
-                            training_sentence_size=100000000,
-                            seed_sentencepiece_size=5000000,
-                            mining_sentence_size=10000000,
+                            seed_sentencepiece_size=10000000,
                             reserved_tokens=None,
                             greedy_encode=False):
     """Inner implementation for vocab generators.
@@ -1186,9 +1184,7 @@ class SentencePieceEncoder(TextEncoder):
         avoid quadratic costs during vocab building.
       character_coverage: character coverage to determine the minimum symbols.
       input_sentence_size: max number of sentences the trainer loads.
-      training_sentence_size: max number of sentences to train sentence pieces.
       seed_sentencepiece_size: the number of seed tokens.
-      mining_sentence_size: max number of sentences generate seed tokens from.
       reserved_tokens: List of reserved tokens. `RESERVED_TOKENS` should be a 
         prefix of `reserved_tokens`. If `None`, defaults to `RESERVED_TOKENS`.
       greedy_encode: Encode sentences greedily instead of sampling.
@@ -1206,11 +1202,9 @@ class SentencePieceEncoder(TextEncoder):
       spm.SentencePieceTrainer.Train(
           '--input={} --model_prefix={} '
           '--vocab_size={} --max_sentencepiece_length={} '
-          '--training_sentence_size={} --seed_sentencepiece_size={} '
-          '--character_coverage={} --input_sentence_size={} '
-          '--mining_sentence_size={} --split_by_unicode_script=false'.format(
+          '--seed_sentencepiece_size={} --character_coverage={} '
+          '--input_sentence_size={} --split_by_unicode_script=false'.format(
               data_filepaths_str, vocab_prefix_path, vocab_size,
-              max_subtoken_length, training_sentence_size,
-              seed_sentencepiece_size, character_coverage, input_sentence_size,
-              mining_sentence_size))
+              max_subtoken_length, seed_sentencepiece_size, character_coverage,
+              input_sentence_size))
     return cls(vocab_path, greedy_encode=greedy_encode)

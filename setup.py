@@ -47,7 +47,7 @@ setup(
         'opencv-python',
         'requests',
         'scipy',
-        'sentencepiece',
+        'sentencepiece>=0.1.8',
         'six',
         'sympy',
         'tensorflow-probability',
