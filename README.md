@@ -85,7 +85,7 @@ to modify the hyperparameters if you run on a different setup.
 For evaluating mathematical expressions at the character level involving addition, subtraction and multiplication of both positive and negative decimal numbers with variable digits assigned to symbolic variables, use
 
 * the [MLU](https://art.wangperawong.com/mathematical_language_understanding_train.tar.gz) data-set:
- `--problem=mathematical_language_understanding`
+ `--problem=algorithmic_math_two_variables`
 
 You can try solving the problem with different transformer models and hyperparameters as described in the [paper](https://arxiv.org/abs/1812.02825):
 * Standard transformer:
@@ -383,7 +383,7 @@ and are registered with
 **Hyperparameter sets** are defined and registered in code with
 [`@registry.register_hparams`](https://github.com/tensorflow/tensor2tensor/tree/master/tensor2tensor/utils/registry.py)
 and are encoded in
-[`tf.contrib.training.HParams`](https://github.com/tensorflow/tensorflow/blob/master/tensorflow/contrib/training/python/training/hparam.py)
+[`HParams`](https://github.com/tensorflow/tensor2tensor/tree/master/tensor2tensor/utils/hparam.py)
 objects. The `HParams` are available to both the problem specification and the
 model. A basic set of hyperparameters are defined in
 [`common_hparams.py`](https://github.com/tensorflow/tensor2tensor/tree/master/tensor2tensor/layers/common_hparams.py)
@@ -484,5 +484,6 @@ T2T](https://research.googleblog.com/2017/06/accelerating-deep-learning-research
 * [Adafactor: Adaptive Learning Rates with Sublinear Memory Cost](https://arxiv.org/abs/1804.04235)
 * [Universal Transformers](https://arxiv.org/abs/1807.03819)
 * [Attending to Mathematical Language with Transformers](https://arxiv.org/abs/1812.02825)
+* [The Evolved Transformer](https://arxiv.org/abs/1901.11117)
 
 *Note: This is not an official Google product.*

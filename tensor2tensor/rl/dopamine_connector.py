@@ -1,5 +1,5 @@
 # coding=utf-8
-# Copyright 2018 The Tensor2Tensor Authors.
+# Copyright 2019 The Tensor2Tensor Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -40,7 +40,7 @@ try:
 except ImportError:
   cv2 = None
 try:
-  from dopamine.atari import run_experiment
+  from dopamine.discrete_domains import run_experiment
 except ImportError:
   run_experiment = None
 # pylint: enable=g-import-not-at-top
@@ -182,7 +182,7 @@ def get_create_agent(agent_kwargs):
   def create_agent(sess, environment, summary_writer=None):
     """Creates a DQN agent.
 
-    Simplified version of `dopamine.atari.train.create_agent`
+    Simplified version of `dopamine.discrete_domains.train.create_agent`
 
     Args:
       sess: a session

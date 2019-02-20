@@ -1,5 +1,5 @@
 # coding=utf-8
-# Copyright 2018 The Tensor2Tensor Authors.
+# Copyright 2019 The Tensor2Tensor Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -24,6 +24,7 @@ import re
 MODULES = [
     "tensor2tensor.data_generators.algorithmic",
     "tensor2tensor.data_generators.algorithmic_math",
+    "tensor2tensor.data_generators.algorithmic_math_two_variables",
     "tensor2tensor.data_generators.allen_brain",
     "tensor2tensor.data_generators.audio",
     "tensor2tensor.data_generators.babi_qa",
@@ -50,7 +51,6 @@ MODULES = [
     "tensor2tensor.data_generators.lm1b",
     "tensor2tensor.data_generators.lm1b_imdb",
     "tensor2tensor.data_generators.lm1b_mnli",
-    "tensor2tensor.data_generators.mathematical_language_understanding",
     "tensor2tensor.data_generators.mnist",
     "tensor2tensor.data_generators.mrpc",
     "tensor2tensor.data_generators.mscoco",
@@ -72,6 +72,7 @@ MODULES = [
     "tensor2tensor.data_generators.sst_binary",
     "tensor2tensor.data_generators.subject_verb_agreement",
     "tensor2tensor.data_generators.timeseries",
+    "tensor2tensor.data_generators.transduction_problems",
     "tensor2tensor.data_generators.translate_encs",
     "tensor2tensor.data_generators.translate_ende",
     "tensor2tensor.data_generators.translate_enet",

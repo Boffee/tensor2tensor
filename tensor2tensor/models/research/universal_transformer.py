@@ -1,5 +1,5 @@
 # coding=utf-8
-# Copyright 2018 The Tensor2Tensor Authors.
+# Copyright 2019 The Tensor2Tensor Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -466,6 +466,14 @@ def universal_transformer_big():
   hparams = update_hparams_for_universal_transformer(hparams)
   hparams.hidden_size = 2048
   hparams.filter_size = 8192
+  return hparams
+
+
+@registry.register_hparams
+def universal_transformer_base_fp16():
+  hparams = transformer.transformer_base()
+  hparams = update_hparams_for_universal_transformer(hparams)
+  hparams.activation_dtype = "float16"
   return hparams
 
 

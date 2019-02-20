@@ -1,5 +1,5 @@
 # coding=utf-8
-# Copyright 2018 The Tensor2Tensor Authors.
+# Copyright 2019 The Tensor2Tensor Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -105,12 +105,12 @@ class EnvSimulationProblem(video_utils.VideoProblem):
   def hparams(self, defaults, unused_model_hparams):
     p = defaults
     p.modality = {
-        "inputs": modalities.VideoModality,
-        "input_reward": modalities.SymbolModalityWeightsAll,
-        "input_action": modalities.SymbolModalityWeightsAll,
-        "targets": modalities.VideoModality,
-        "target_reward": modalities.SymbolModalityWeightsAll,
-        "target_action": modalities.SymbolModalityWeightsAll,
+        "inputs": modalities.ModalityType.VIDEO,
+        "input_reward": modalities.ModalityType.SYMBOL_WEIGHTS_ALL,
+        "input_action": modalities.ModalityType.SYMBOL_WEIGHTS_ALL,
+        "targets": modalities.ModalityType.VIDEO,
+        "target_reward": modalities.ModalityType.SYMBOL_WEIGHTS_ALL,
+        "target_action": modalities.ModalityType.SYMBOL_WEIGHTS_ALL,
     }
     p.vocab_size = {
         "inputs": 256,

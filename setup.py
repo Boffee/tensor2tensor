@@ -42,7 +42,8 @@ setup(
         'gunicorn',
         'gym',
         'h5py',
-        'mesh-tensorflow==0.0.5',
+        'kfac',
+        'mesh-tensorflow',
         'numpy',
         'oauth2client',
         'opencv-python',
@@ -53,7 +54,7 @@ setup(
         'sympy',
         'tensorflow-probability',
         'tf-agents',
-        'tfds-nightly',
+        'tensorflow-datasets',
         'tqdm',
     ],
     extras_require={

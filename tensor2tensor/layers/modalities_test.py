@@ -1,5 +1,5 @@
 # coding=utf-8
-# Copyright 2018 The Tensor2Tensor Authors.
+# Copyright 2019 The Tensor2Tensor Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -23,13 +23,15 @@ import numpy as np
 from tensor2tensor.layers import common_hparams
 from tensor2tensor.layers import modalities
 from tensor2tensor.utils import expert_utils
+from tensor2tensor.utils import test_utils
 
 import tensorflow as tf
+tf.compat.v1.enable_eager_execution()
 
 
 class ModalityTest(tf.test.TestCase):
 
-  @tf.contrib.eager.run_test_in_graph_and_eager_modes()
+  @test_utils.run_in_graph_and_eager_modes()
   def testSymbolModalityInputs(self):
     batch_size = 10
     num_datashards = 5
@@ -45,13 +47,13 @@ class ModalityTest(tf.test.TestCase):
     data_parallelism = expert_utils.Parallelism(
         ["/device:CPU:0"] * num_datashards)
     xs = tf.split(x, num_datashards)
-    sharded_output = m.bottom_sharded(xs, data_parallelism)
+    sharded_output = data_parallelism(m.bottom, xs)
     output = tf.concat(sharded_output, 0)
     self.evaluate(tf.global_variables_initializer())
     res = self.evaluate(output)
     self.assertEqual(res.shape, (batch_size, length, 1, hidden_size))
 
-  @tf.contrib.eager.run_test_in_graph_and_eager_modes()
+  @test_utils.run_in_graph_and_eager_modes()
   def testSymbolModalityTargets(self):
     batch_size = 10
     num_datashards = 5
@@ -71,16 +73,21 @@ class ModalityTest(tf.test.TestCase):
         ["/device:CPU:0"] * num_datashards)
     sharded_body_output = tf.split(tf.to_float(body_output), num_datashards)
     sharded_targets = tf.split(targets, num_datashards)
-    sharded_logits = m.top_sharded(sharded_body_output, sharded_targets,
-                                   data_parallelism)
-    train_loss = m.loss_sharded(sharded_logits, sharded_targets,
-                                data_parallelism)
+    sharded_logits = data_parallelism(m.top,
+                                      sharded_body_output,
+                                      sharded_targets)
+    sharded_loss_num, sharded_loss_den = data_parallelism(m.loss,
+                                                          sharded_logits,
+                                                          sharded_targets)
+    train_loss = (tf.add_n(sharded_loss_num) /
+                  tf.maximum(1.0, tf.add_n(sharded_loss_den)))
     logits = tf.concat(sharded_logits, 0)
     self.evaluate(tf.global_variables_initializer())
     res1, res2 = self.evaluate((logits, train_loss))
     self.assertEqual(res1.shape, (batch_size, length, height, 1, vocab_size))
     self.assertEqual(res2.shape, ())
 
+  @test_utils.run_in_graph_mode_only()
   def testSymbolModalityTargetsFactored(self):
     batch_size = 10
     num_datashards = 5
@@ -102,10 +109,14 @@ class ModalityTest(tf.test.TestCase):
     with self.test_session() as session:
       sharded_body_output = tf.split(tf.to_float(body_output), num_datashards)
       sharded_targets = tf.split(targets, num_datashards)
-      sharded_logits = m.top_sharded(sharded_body_output, sharded_targets,
-                                     data_parallelism)
-      train_loss = m.loss_sharded(sharded_logits, sharded_targets,
-                                  data_parallelism)
+      sharded_logits = data_parallelism(m.top,
+                                        sharded_body_output,
+                                        sharded_targets)
+      sharded_loss_num, sharded_loss_den = data_parallelism(m.loss,
+                                                            sharded_logits,
+                                                            sharded_targets)
+      train_loss = (tf.add_n(sharded_loss_num) /
+                    tf.maximum(1.0, tf.add_n(sharded_loss_den)))
       logits = tf.concat(sharded_logits, 0)
       session.run(tf.global_variables_initializer())
       res1, res2 = session.run((logits, train_loss))
