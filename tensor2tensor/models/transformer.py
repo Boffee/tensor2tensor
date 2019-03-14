@@ -32,6 +32,7 @@ from tensor2tensor.data_generators import librispeech
 from tensor2tensor.layers import common_attention
 from tensor2tensor.layers import common_hparams
 from tensor2tensor.layers import common_layers
+from tensor2tensor.layers import modalities
 from tensor2tensor.layers import transformer_layers
 from tensor2tensor.utils import beam_search
 from tensor2tensor.utils import expert_utils
@@ -371,10 +372,13 @@ class Transformer(t2t_model.T2TModel):
     dp = self._data_parallelism
     hparams = self._hparams
     target_modality = self._problem_hparams.modality["targets"]
+    target_vocab_size = self._problem_hparams.vocab_size["targets"]
+    if target_vocab_size is not None and hasattr(hparams, "vocab_divisor"):
+      target_vocab_size += (-target_vocab_size) % hparams.vocab_divisor
 
     if self.has_input:
       inputs = features["inputs"]
-      if target_modality.is_class_modality:
+      if target_modality == modalities.ModalityType.CLASS_LABEL:
         decode_length = 1
       else:
         decode_length = (
@@ -391,8 +395,16 @@ class Transformer(t2t_model.T2TModel):
       # _shard_features called to ensure that the variable names match
       inputs = self._shard_features({"inputs": inputs})["inputs"]
       input_modality = self._problem_hparams.modality["inputs"]
-      with tf.variable_scope(input_modality.name):
-        inputs = dp(input_modality.bottom, inputs)
+      input_vocab_size = self._problem_hparams.vocab_size["inputs"]
+      if input_vocab_size is not None and hasattr(hparams, "vocab_divisor"):
+        input_vocab_size += (-input_vocab_size) % hparams.vocab_divisor
+      modality_name = hparams.name.get(
+          "inputs",
+          modalities.get_name(input_modality))(hparams, input_vocab_size)
+      with tf.variable_scope(modality_name):
+        bottom = hparams.bottom.get("inputs",
+                                    modalities.get_bottom(input_modality))
+        inputs = dp(bottom, inputs, hparams, input_vocab_size)
       with tf.variable_scope("body"):
         encoder_output, encoder_decoder_attention_bias = dp(
             self.encode,
@@ -450,8 +462,13 @@ class Transformer(t2t_model.T2TModel):
       """
       # _shard_features called to ensure that the variable names match
       targets = self._shard_features({"targets": targets})["targets"]
-      with tf.variable_scope(target_modality.name):
-        targets = dp(target_modality.targets_bottom, targets)[0]
+      modality_name = hparams.name.get(
+          "targets",
+          modalities.get_name(target_modality))(hparams, target_vocab_size)
+      with tf.variable_scope(modality_name):
+        bottom = hparams.bottom.get(
+            "targets", modalities.get_targets_bottom(target_modality))
+        targets = dp(bottom, targets, hparams, target_vocab_size)[0]
       targets = common_layers.flatten4d3d(targets)
 
       # TODO(llion): Explain! Is this even needed?
@@ -505,9 +522,13 @@ class Transformer(t2t_model.T2TModel):
             cache,
             i,
             nonpadding=features_to_nonpadding(features, "targets"))
-
-      with tf.variable_scope(target_modality.name):
-        logits = dp(target_modality.top, body_outputs, None)[0]
+      modality_name = hparams.name.get(
+          "targets",
+          modalities.get_name(target_modality))(hparams, target_vocab_size)
+      with tf.variable_scope(modality_name):
+        top = hparams.top.get("targets",
+                              modalities.get_top(target_modality))
+        logits = dp(top, body_outputs, None, hparams, target_vocab_size)[0]
 
       ret = tf.squeeze(logits, axis=[1, 2, 3])
       if partial_targets is not None:
@@ -529,17 +550,13 @@ class Transformer(t2t_model.T2TModel):
             tf.less(i, partial_targets_length), forced_logits, lambda: ret)
       return ret, cache
 
-    vocab_size = self._problem_hparams.vocab_size["targets"]
-    if hasattr(self._hparams, "vocab_divisor"):
-      vocab_size += (-vocab_size) % self._hparams.vocab_divisor
-
     ret = fast_decode_tpu(
         encoder_output=encoder_output,
         encoder_decoder_attention_bias=encoder_decoder_attention_bias,
         symbols_to_logits_fn=symbols_to_logits_tpu_fn,
         hparams=hparams,
         decode_length=decode_length,
-        vocab_size=vocab_size,
+        vocab_size=target_vocab_size,
         beam_size=beam_size,
         top_beams=top_beams,
         alpha=alpha,
@@ -588,6 +605,9 @@ class Transformer(t2t_model.T2TModel):
     dp = self._data_parallelism
     hparams = self._hparams
     target_modality = self._problem_hparams.modality["targets"]
+    target_vocab_size = self._problem_hparams.vocab_size["targets"]
+    if target_vocab_size is not None and hasattr(hparams, "vocab_divisor"):
+      target_vocab_size += (-target_vocab_size) % hparams.vocab_divisor
     if "targets_segmentation" in features:
       raise NotImplementedError(
           "Decoding not supported on packed datasets "
@@ -595,7 +615,7 @@ class Transformer(t2t_model.T2TModel):
           " of the dataset when decoding.")
     if self.has_input:
       inputs = features["inputs"]
-      if target_modality.is_class_modality:
+      if target_modality == modalities.ModalityType.CLASS_LABEL:
         decode_length = 1
       else:
         decode_length = (
@@ -612,8 +632,16 @@ class Transformer(t2t_model.T2TModel):
       # _shard_features called to ensure that the variable names match
       inputs = self._shard_features({"inputs": inputs})["inputs"]
       input_modality = self._problem_hparams.modality["inputs"]
-      with tf.variable_scope(input_modality.name):
-        inputs = dp(input_modality.bottom, inputs)
+      input_vocab_size = self._problem_hparams.vocab_size["inputs"]
+      if input_vocab_size is not None and hasattr(hparams, "vocab_divisor"):
+        input_vocab_size += (-input_vocab_size) % hparams.vocab_divisor
+      modality_name = hparams.name.get(
+          "inputs",
+          modalities.get_name(input_modality))(hparams, input_vocab_size)
+      with tf.variable_scope(modality_name):
+        bottom = hparams.bottom.get("inputs",
+                                    modalities.get_bottom(input_modality))
+        inputs = dp(bottom, inputs, hparams, input_vocab_size)
       with tf.variable_scope("body"):
         encoder_output, encoder_decoder_attention_bias = dp(
             self.encode,
@@ -671,8 +699,13 @@ class Transformer(t2t_model.T2TModel):
       """
       # _shard_features called to ensure that the variable names match
       targets = self._shard_features({"targets": targets})["targets"]
-      with tf.variable_scope(target_modality.name):
-        targets = dp(target_modality.targets_bottom, targets)[0]
+      modality_name = hparams.name.get(
+          "targets",
+          modalities.get_name(target_modality))(hparams, target_vocab_size)
+      with tf.variable_scope(modality_name):
+        bottom = hparams.bottom.get(
+            "targets", modalities.get_targets_bottom(target_modality))
+        targets = dp(bottom, targets, hparams, target_vocab_size)[0]
       targets = common_layers.flatten4d3d(targets)
 
       # TODO(llion): Explain! Is this even needed?
@@ -708,8 +741,12 @@ class Transformer(t2t_model.T2TModel):
             cache,
             nonpadding=features_to_nonpadding(features, "targets"))
 
-      with tf.variable_scope(target_modality.name):
-        logits = dp(target_modality.top, body_outputs, None)[0]
+      modality_name = hparams.name.get(
+          "targets",
+          modalities.get_name(target_modality))(hparams, target_vocab_size)
+      with tf.variable_scope(modality_name):
+        top = hparams.top.get("targets", modalities.get_top(target_modality))
+        logits = dp(top, body_outputs, None, hparams, target_vocab_size)[0]
 
       ret = tf.squeeze(logits, axis=[1, 2, 3])
       if partial_targets is not None:
@@ -729,17 +766,13 @@ class Transformer(t2t_model.T2TModel):
             tf.less(i, partial_targets_length), forced_logits, lambda: ret)
       return ret, cache
 
-    vocab_size = self._problem_hparams.vocab_size["targets"]
-    if hasattr(self._hparams, "vocab_divisor"):
-      vocab_size += (-vocab_size) % self._hparams.vocab_divisor
-
     ret = fast_decode(
         encoder_output=encoder_output,
         encoder_decoder_attention_bias=encoder_decoder_attention_bias,
         symbols_to_logits_fn=symbols_to_logits_fn,
         hparams=hparams,
         decode_length=decode_length,
-        vocab_size=vocab_size,
+        vocab_size=target_vocab_size,
         beam_size=beam_size,
         top_beams=top_beams,
         alpha=alpha,
@@ -1424,257 +1457,6 @@ def transformer_decoder(decoder_input,
         value={"hidden_size": hparams.hidden_size})
     return common_layers.layer_preprocess(
         x, hparams, layer_collection=layer_collection)
-
-
-def evolved_transformer_decoder(decoder_input,
-                                encoder_output,
-                                decoder_self_attention_bias,
-                                encoder_decoder_attention_bias,
-                                hparams,
-                                cache=None,
-                                decode_loop_step=None,
-                                name="decoder",
-                                nonpadding=None,
-                                save_weights_to=None,
-                                make_image_summary=True,
-                                losses=None):
-  """Evolved Transformer decoder. See arxiv.org/abs/1901.11117 for more details.
-
-  Args:
-    decoder_input: a Tensor.
-    encoder_output: a Tensor.
-    decoder_self_attention_bias: bias Tensor for self-attention (see
-      common_attention.attention_bias()).
-    encoder_decoder_attention_bias: bias Tensor for encoder-decoder attention
-      (see common_attention.attention_bias()).
-    hparams: hyperparameters for model.
-    cache: Not supported.
-    decode_loop_step: An integer, step number of the decoding loop. Only used
-      for inference on TPU.
-    name: a string.
-    nonpadding: optional Tensor with shape [batch_size, encoder_length]
-      indicating what positions are not padding.  This is used to mask out
-      padding in convolutional layers.  We generally only need this mask for
-      "packed" datasets, because for ordinary datasets, no padding is ever
-      followed by nonpadding.
-    save_weights_to: an optional dictionary to capture attention weights for
-      visualization; the weights tensor will be appended there under a string
-      key created from the variable scope (including name).
-    make_image_summary: Whether to make an attention image summary.
-    losses: Not supported.
-
-  Returns:
-    Decoder output tensor.
-  """
-  del cache, losses
-
-  attention_dropout_broadcast_dims = (
-      common_layers.comma_separated_string_to_integer_list(
-          getattr(hparams, "attention_dropout_broadcast_dims", "")))
-
-  with tf.variable_scope(name):
-    hidden_state = decoder_input
-    layer_cache = None
-
-    for layer in range(hparams.num_decoder_layers or hparams.num_hidden_layers):
-      with tf.variable_scope("layer_%d" % layer):
-
-        with tf.variable_scope("16_head_self_attention"):
-          residual_state = hidden_state
-          hidden_state = common_layers.layer_preprocess(hidden_state, hparams)
-
-          # 16 head attention. Hard coding number of heads.
-          left_state = common_attention.multihead_attention(
-              hidden_state,
-              None,
-              decoder_self_attention_bias,
-              hparams.attention_key_channels or hparams.hidden_size,
-              hparams.attention_value_channels or hparams.hidden_size,
-              hparams.hidden_size,
-              16,  # Heads are hard coded to replicate paper.
-              hparams.attention_dropout,
-              attention_type=hparams.self_attention_type,
-              max_relative_position=hparams.max_relative_position,
-              heads_share_relative_embedding=(
-                  hparams.heads_share_relative_embedding),
-              add_relative_to_values=hparams.add_relative_to_values,
-              save_weights_to=save_weights_to,
-              cache=layer_cache,
-              make_image_summary=make_image_summary,
-              dropout_broadcast_dims=attention_dropout_broadcast_dims,
-              max_length=hparams.get("max_length"),
-              decode_loop_step=decode_loop_step,
-              vars_3d=hparams.get("attention_variables_3d"),
-              activation_dtype=hparams.get("activation_dtype", "float32"),
-              weight_dtype=hparams.get("weight_dtype", "float32"))
-
-        if encoder_output is not None:
-          with tf.variable_scope("first_attend_to_encoder"):
-            right_state = common_attention.multihead_attention(
-                hidden_state,
-                encoder_output,
-                encoder_decoder_attention_bias,
-                hparams.attention_key_channels or hparams.hidden_size,
-                hparams.attention_value_channels or hparams.hidden_size,
-                hparams.hidden_size,
-                hparams.num_heads,
-                hparams.attention_dropout,
-                max_relative_position=hparams.max_relative_position,
-                heads_share_relative_embedding=(
-                    hparams.heads_share_relative_embedding),
-                add_relative_to_values=hparams.add_relative_to_values,
-                save_weights_to=save_weights_to,
-                cache=layer_cache,
-                make_image_summary=make_image_summary,
-                dropout_broadcast_dims=attention_dropout_broadcast_dims,
-                max_length=hparams.get("max_length"),
-                vars_3d=hparams.get("attention_variables_3d"),
-                activation_dtype=hparams.get("activation_dtype", "float32"),
-                weight_dtype=hparams.get("weight_dtype", "float32"))
-
-            left_state = tf.nn.dropout(left_state,
-                                       1 - hparams.layer_prepostprocess_dropout)
-            right_state = tf.nn.dropout(
-                right_state, 1 - hparams.layer_prepostprocess_dropout)
-
-            hidden_state = residual_state + left_state + right_state
-
-        else:
-          hidden_state = common_layers.layer_postprocess(
-              residual_state, left_state, hparams)
-
-        with tf.variable_scope("conv_branches"):
-          residual_state = hidden_state
-          hidden_state = common_layers.layer_preprocess(hidden_state, hparams)
-
-          if nonpadding:
-            # Mask padding from conv layers.
-            mask = tf.tile(
-                tf.expand_dims(nonpadding, 2), [1, 1, hparams.hidden_size])
-            hidden_state *= mask
-
-          # Shift inputs so that future tokens cannot be seen.
-          left_state = tf.pad(hidden_state, paddings=[[0, 0], [10, 0], [0, 0]])
-          left_output_dim = int(hparams.hidden_size * 2)
-          separable_conv_11x1 = tf.layers.SeparableConv1D(
-              left_output_dim,
-              11,
-              padding="VALID",
-              name="separable_conv11x1",
-              activation=tf.nn.relu)
-          left_state = separable_conv_11x1.apply(left_state)
-          left_state = tf.nn.dropout(left_state,
-                                     1 - hparams.layer_prepostprocess_dropout)
-
-          right_state = tf.pad(hidden_state, paddings=[[0, 0], [6, 0], [0, 0]])
-          right_output_dim = int(hparams.hidden_size / 2)
-          separable_conv_7x1_1 = tf.layers.SeparableConv1D(
-              right_output_dim, 7, padding="VALID", name="separable_conv_7x1_1")
-          right_state = separable_conv_7x1_1.apply(right_state)
-          right_state = tf.nn.dropout(right_state,
-                                      1 - hparams.layer_prepostprocess_dropout)
-          right_state = tf.pad(
-              right_state,
-              [[0, 0], [0, 0], [0, left_output_dim - right_output_dim]],
-              constant_values=0)
-
-          hidden_state = left_state + right_state
-
-          hidden_state = common_layers.layer_preprocess(hidden_state, hparams)
-          if nonpadding:
-            # Mask padding from conv layers.
-            mask = tf.tile(
-                tf.expand_dims(nonpadding, 2), [1, 1, hparams.hidden_size])
-            hidden_state *= mask
-
-          hidden_state = tf.pad(hidden_state, paddings=[[0, 0], [6, 0], [0, 0]])
-          separable_conv_7x1_2 = tf.layers.SeparableConv1D(
-              hparams.hidden_size,
-              7,
-              padding="VALID",
-              name="separable_conv_7x1_2")
-          hidden_state = separable_conv_7x1_2.apply(hidden_state)
-
-          hidden_state = common_layers.layer_postprocess(
-              residual_state, hidden_state, hparams)
-
-        with tf.variable_scope("self_attention"):
-          residual_state = hidden_state
-          hidden_state = common_layers.layer_preprocess(hidden_state, hparams)
-
-          hidden_state = common_attention.multihead_attention(
-              hidden_state,
-              None,
-              decoder_self_attention_bias,
-              hparams.attention_key_channels or hparams.hidden_size,
-              hparams.attention_value_channels or hparams.hidden_size,
-              hparams.hidden_size,
-              hparams.num_heads,
-              hparams.attention_dropout,
-              attention_type=hparams.self_attention_type,
-              max_relative_position=hparams.max_relative_position,
-              heads_share_relative_embedding=(
-                  hparams.heads_share_relative_embedding),
-              add_relative_to_values=hparams.add_relative_to_values,
-              save_weights_to=save_weights_to,
-              cache=layer_cache,
-              make_image_summary=make_image_summary,
-              dropout_broadcast_dims=attention_dropout_broadcast_dims,
-              max_length=hparams.get("max_length"),
-              decode_loop_step=decode_loop_step,
-              vars_3d=hparams.get("attention_variables_3d"),
-              activation_dtype=hparams.get("activation_dtype", "float32"),
-              weight_dtype=hparams.get("weight_dtype", "float32"))
-          hidden_state = common_layers.layer_postprocess(
-              residual_state, hidden_state, hparams)
-
-        if encoder_output is not None:
-          with tf.variable_scope("second_attend_to_encoder"):
-            residual_state = hidden_state
-            hidden_state = common_layers.layer_preprocess(hidden_state, hparams)
-
-            hidden_state = common_attention.multihead_attention(
-                hidden_state,
-                encoder_output,
-                encoder_decoder_attention_bias,
-                hparams.attention_key_channels or hparams.hidden_size,
-                hparams.attention_value_channels or hparams.hidden_size,
-                hparams.hidden_size,
-                hparams.num_heads,
-                hparams.attention_dropout,
-                max_relative_position=hparams.max_relative_position,
-                heads_share_relative_embedding=(
-                    hparams.heads_share_relative_embedding),
-                add_relative_to_values=hparams.add_relative_to_values,
-                save_weights_to=save_weights_to,
-                cache=layer_cache,
-                make_image_summary=make_image_summary,
-                dropout_broadcast_dims=attention_dropout_broadcast_dims,
-                max_length=hparams.get("max_length"),
-                vars_3d=hparams.get("attention_variables_3d"),
-                activation_dtype=hparams.get("activation_dtype", "float32"),
-                weight_dtype=hparams.get("weight_dtype", "float32"))
-            hidden_state = common_layers.layer_postprocess(
-                residual_state, hidden_state, hparams)
-
-        with tf.variable_scope("dense_layers"):
-          residual_state = hidden_state
-          hidden_state = common_layers.layer_preprocess(hidden_state, hparams)
-
-          hidden_state = tf.layers.dense(
-              hidden_state,
-              int(hparams.hidden_size * 4),
-              activation=tf.nn.swish)
-          hidden_state = tf.nn.dropout(hidden_state,
-                                       1 - hparams.layer_prepostprocess_dropout)
-
-          hidden_state = common_layers.layer_preprocess(hidden_state, hparams)
-
-          hidden_state = tf.layers.dense(hidden_state, hparams.hidden_size)
-          hidden_state = common_layers.layer_postprocess(
-              residual_state, hidden_state, hparams)
-
-    return common_layers.layer_preprocess(hidden_state, hparams)
 
 
 @registry.register_hparams

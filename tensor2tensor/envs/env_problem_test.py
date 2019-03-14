@@ -26,6 +26,7 @@ import numpy as np
 from tensor2tensor.data_generators import generator_utils
 from tensor2tensor.data_generators import problem
 from tensor2tensor.envs import env_problem
+from tensor2tensor.envs import env_problem_utils
 from tensor2tensor.layers import modalities
 import tensorflow as tf
 
@@ -86,7 +87,12 @@ class EnvProblemTest(tf.test.TestCase):
     # Assert that it is as expected of the underlying environment.
     reward_range = ep.reward_range
     self.assertEqual(0, reward_range[0])
-    self.assertEqual(ep._envs[0].maxWealth, reward_range[1])
+
+    # Google's version of Gym has maxWealth, vs max_wealth externally.
+    max_wealth = getattr(ep._envs[0], "maxWealth",
+                         getattr(ep._envs[0], "max_wealth", None))
+    self.assertIsNotNone(max_wealth)
+    self.assertEqual(max_wealth, reward_range[1])
 
     # Check that the processed rewards are discrete.
     self.assertTrue(ep.is_processed_rewards_discrete)
@@ -129,7 +135,7 @@ class EnvProblemTest(tf.test.TestCase):
                        len(ep.trajectories.completed_trajectories))
 
       # Get the indices where we are done ...
-      done_indices = env_problem.EnvProblem.done_indices(dones)
+      done_indices = env_problem_utils.done_indices(dones)
 
       # ... and reset those.
       ep.reset(indices=done_indices)
@@ -146,7 +152,7 @@ class EnvProblemTest(tf.test.TestCase):
 
       # This should also match the number of time-steps completed given by ep.
       num_timesteps_completed_ep = sum(
-          ct.num_time_steps() for ct in ep.trajectories.completed_trajectories)
+          ct.num_time_steps for ct in ep.trajectories.completed_trajectories)
       self.assertEqual(num_timesteps_completed, num_timesteps_completed_ep)
 
     # Reset the trajectories.
@@ -213,7 +219,7 @@ class EnvProblemTest(tf.test.TestCase):
       # Step through it.
       _, _, dones, _ = env.step(actions)
       # Get the indices where we are done ...
-      done_indices = env_problem.EnvProblem.done_indices(dones)
+      done_indices = env_problem_utils.done_indices(dones)
       # ... and reset those.
       env.reset(indices=done_indices)
       # count the number of dones we got, in this step and overall.
@@ -284,6 +290,10 @@ class EnvProblemTest(tf.test.TestCase):
       @property
       def target_vocab_size(self):
         return 2
+
+      @property
+      def action_modality(self):
+        return modalities.ModalityType.SYMBOL_WEIGHTS_ALL
 
     base_env_name = "CartPole-v0"
     batch_size = 5

@@ -47,6 +47,12 @@ _ENDE_EVAL_DATASETS = [
         ("dev/newstest2013.en", "dev/newstest2013.de")
     ],
 ]
+_ENDE_PARACRAWL_DATASETS = [
+    [
+        "https://s3.amazonaws.com/web-language-models/paracrawl/release3/en-de.bicleaner07.tmx.gz",  # pylint: disable=line-too-long
+        ("tmx", "en-de.bicleaner07.tmx.gz")
+    ]
+]
 
 
 @registry.register_problem
@@ -77,6 +83,47 @@ class TranslateEndeWmt32k(TranslateEndeWmt8k):
 
 
 @registry.register_problem
+class TranslateEndeWmtClean32k(TranslateEndeWmt32k):
+
+  @property
+  def use_vocab_from_other_problem(self):
+    return TranslateEndeWmt32k()
+
+  @property
+  def datatypes_to_clean(self):
+    return ["txt"]
+
+
+@registry.register_problem
+class TranslateEndeParacrawl32k(translate.TranslateProblem):
+  """Problem spec for Paracrawl en-de translation."""
+
+  @property
+  def use_vocab_from_other_problem(self):
+    return TranslateEndeWmt32k()
+
+  @property
+  def additional_training_datasets(self):
+    """Allow subclasses to add training datasets."""
+    return []
+
+  def source_data_files(self, dataset_split):
+    train = dataset_split == problem.DatasetSplit.TRAIN
+    train_datasets = (
+        _ENDE_PARACRAWL_DATASETS + self.additional_training_datasets)
+    return train_datasets if train else _ENDE_EVAL_DATASETS
+
+
+@registry.register_problem
+class TranslateEndeParacrawlClean32k(TranslateEndeParacrawl32k):
+  """Paracrawl en-de Bicleaner corpus, with additional cleaning."""
+
+  @property
+  def datatypes_to_clean(self):
+    return ["tmx"]
+
+
+@registry.register_problem
 class TranslateEndeWmtParacrawlBicleaner32k(TranslateEndeWmt32k):
   """WMT en-de corpus with extra data from Paracrawl, cleaned with Bicleaner."""
 
@@ -86,9 +133,31 @@ class TranslateEndeWmtParacrawlBicleaner32k(TranslateEndeWmt32k):
 
   @property
   def additional_training_datasets(self):
-    paracrawl = "https://s3.amazonaws.com/web-language-models/paracrawl/"
-    return [(paracrawl + "release3/en-de.bicleaner07.tmx.gz",
-             ("tmx", "en-de.bicleaner07.tmx.gz"))]
+    return _ENDE_PARACRAWL_DATASETS
+
+
+@registry.register_problem
+class TranslateEndeWmtCleanParacrawl32k(TranslateEndeWmtParacrawlBicleaner32k):
+
+  @property
+  def datatypes_to_clean(self):
+    return ["txt"]
+
+
+@registry.register_problem
+class TranslateEndeWmtParacrawlClean32k(TranslateEndeWmtParacrawlBicleaner32k):
+
+  @property
+  def datatypes_to_clean(self):
+    return ["tmx"]
+
+
+@registry.register_problem
+class TranslateEndeWmtParacrawlAllClean32k(TranslateEndeWmtParacrawlClean32k):
+
+  @property
+  def datatypes_to_clean(self):
+    return ["txt", "tmx"]
 
 
 @registry.register_problem
@@ -152,5 +221,3 @@ class TranslateEndeWmtMulti64kPacked1k(TranslateEndeWmtMulti64k):
   @property
   def targets_prefix(self):
     return "translate German English "
-
-
