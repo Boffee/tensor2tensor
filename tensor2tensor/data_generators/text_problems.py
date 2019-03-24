@@ -244,8 +244,11 @@ class Text2TextProblem(problem.Problem):
             reserved_tokens=(
                 text_encoder.RESERVED_TOKENS + self.additional_reserved_tokens))
     elif self.vocab_type == VocabType.SENTENCEPIECE:
+      vocab_filepath = os.path.join(data_dir, self.vocab_filename + '.model')
       if force_get:
-        vocab_filepath = os.path.join(data_dir, self.vocab_filename + '.model')
+        encoder = text_encoder.SentencePieceEncoder(vocab_filepath)
+      elif tf.gfile.Exists(vocab_filepath):
+        tf.logging.info("Found vocab file: %s", vocab_filepath)
         encoder = text_encoder.SentencePieceEncoder(vocab_filepath)
       else:
         _, tmp_file_path = tempfile.mkstemp()
