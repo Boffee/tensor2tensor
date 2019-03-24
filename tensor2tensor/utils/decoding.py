@@ -74,6 +74,7 @@ def decode_hparams(overrides=""):
       num_decodes=1,
       force_decode_length=False,
       multi_targets=False,
+      score=False,
       display_decoded_images=False,
       # Multi-problem decoding task id.
       multiproblem_task_id=-1,
