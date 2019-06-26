@@ -257,7 +257,7 @@ class Text2TextProblem(problem.Problem):
             fh.write(text.rstrip() + '\n')
         encoder = text_encoder.SentencePieceEncoder.get_or_generate_vocab(
             data_dir, self.vocab_filename, self.approx_vocab_size,
-            [tmp_file_path])
+            [tmp_file_path], max_subtoken_length=self.max_subtoken_length)
     elif self.vocab_type == VocabType.TOKEN:
       vocab_filename = os.path.join(data_dir, self.vocab_filename)
       encoder = text_encoder.TokenTextEncoder(vocab_filename,
