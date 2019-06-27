@@ -51,7 +51,7 @@ setup(
         'sentencepiece>=0.1.8',
         'six',
         'sympy',
-        'tensorflow-probability',
+        'tensorflow-probability==0.5.0',
         'tf-agents',
         'tfds-nightly',
         'tqdm',
