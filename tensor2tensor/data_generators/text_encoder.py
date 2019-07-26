@@ -36,6 +36,7 @@ import tempfile
 import time
 import numpy as np
 import six
+import unicodedata
 from six.moves import range  # pylint: disable=redefined-builtin
 from tensor2tensor.data_generators import tokenizer
 
@@ -1075,13 +1076,15 @@ class SentencePieceEncoder(TextEncoder):
   def __init__(self,
                model_filepath,
                num_reserved_ids=NUM_RESERVED_TOKENS,
-               greedy_encode=False):
+               greedy_encode=False,
+               normalize=False):
     self._num_reserved_ids = num_reserved_ids
     _, tmp_file_path = tempfile.mkstemp()
     tf.gfile.Copy(model_filepath, tmp_file_path, overwrite=True)
     model_filepath = tmp_file_path
     self.model_filepath = model_filepath
     self.greedy_encode = greedy_encode
+    self.normalize = normalize
     self.sp = spm.SentencePieceProcessor()
     self.sp.Load(model_filepath)
 
@@ -1106,6 +1109,8 @@ class SentencePieceEncoder(TextEncoder):
     Returns:
       ids: list of integers
     """
+    if self.normalize:
+      s = normalize_text(s)
     if self.greedy_encode:
       _encoder = self.sp.EncodeAsIds
     else:
@@ -1206,3 +1211,23 @@ class SentencePieceEncoder(TextEncoder):
               max_subtoken_length, seed_sentencepiece_size, character_coverage,
               input_sentence_size))
     return cls(vocab_path, greedy_encode=greedy_encode)
+
+
+def normalize_text(text):
+  text = strip_accents(text)
+  text = normalize_spaces(text)
+  return text
+
+
+def strip_accents(text):
+  return ''.join(
+      char for char in unicodedata.normalize('NFD', text)
+      if unicodedata.category(char) != 'Mn')
+
+
+def normalize_spaces(text):
+  return ''.join(' ' if _is_space(char) else char for char in text)
+
+
+def _is_space(char):
+  return char.isspace() or unicodedata.category(char) == 'Zs'
