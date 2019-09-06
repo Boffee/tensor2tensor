@@ -110,6 +110,15 @@ def strip_ids(ids, ids_to_strip):
   return ids
 
 
+def strip_ids_forward(ids, ids_to_strip):
+  """Strip ids after first occurrance of ids_to_strip."""
+  ids = np.array(ids).tolist()
+  for i, id in enumerate(ids):
+    if id in ids_to_strip:
+      return ids[:i]
+  return ids
+
+
 class TextEncoder(object):
   """Base class for converting from ints to/from human readable strings."""
 
@@ -1132,7 +1141,7 @@ class SentencePieceEncoder(TextEncoder):
     """
     ids = np.array(ids).tolist()
     if strip_extraneous:
-      ids = strip_ids(ids, list(range(self._num_reserved_ids or 0)))
+      ids = strip_ids_forward(ids, list(range(self._num_reserved_ids or 0)))
 
     ids = [id_ - self._num_reserved_ids for id_ in ids]
     return self.sp.DecodeIds(ids)
