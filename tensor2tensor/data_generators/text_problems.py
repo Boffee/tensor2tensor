@@ -1166,7 +1166,7 @@ class DistributedText2TextProblem(Text2TextProblem):
         problem.DatasetSplit.TEST: self.test_filepaths,
     }
 
-    return filepath_fns[dataset_split](data_dir, shards, False)[offset]
+    return filepath_fns[dataset_split](data_dir, shards, self.already_shuffled)[offset]
 
   @staticmethod
   def _divide_equally(input_files, num_tasks, task_id):
